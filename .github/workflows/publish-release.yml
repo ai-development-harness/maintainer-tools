@@ -1,0 +1,181 @@
+name: Publish Harness Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release tag, например v0.2.7"
+        required: true
+        type: string
+      title:
+        description: "Название GitHub Release"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: harness-release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout maintainer tools
+        uses: actions/checkout@v7
+
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Read release config
+        id: config
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          config = json.loads(Path("config/release.json").read_text(encoding="utf-8"))
+          owner, name = config["targetRepository"].split("/", 1)
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              print(f"target_repository={config['targetRepository']}", file=out)
+              print(f"owner={owner}", file=out)
+              print(f"repository_name={name}", file=out)
+              print(f"default_branch={config['defaultBranch']}", file=out)
+              print(f"branch_prefix={config['releaseBranchPrefix']}", file=out)
+          PY
+
+      - name: Create scoped GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.HARNESS_RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.HARNESS_RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ steps.config.outputs.owner }}
+          repositories: ${{ steps.config.outputs.repository_name }}
+          permission-contents: write
+          permission-pull-requests: read
+
+      - name: Checkout Harness source repository
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ steps.config.outputs.target_repository }}
+          ref: ${{ steps.config.outputs.default_branch }}
+          token: ${{ steps.app-token.outputs.token }}
+          path: target
+          fetch-depth: 0
+
+      - name: Resolve merged release PR
+        id: release-pr
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+          TARGET_REPOSITORY: ${{ steps.config.outputs.target_repository }}
+          DEFAULT_BRANCH: ${{ steps.config.outputs.default_branch }}
+          BRANCH_PREFIX: ${{ steps.config.outputs.branch_prefix }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+
+          BRANCH="${BRANCH_PREFIX}${VERSION}"
+          EXPECTED_TITLE="chore: подготовить release ${VERSION}"
+
+          PR_JSON="$(gh pr list \
+            --repo "$TARGET_REPOSITORY" \
+            --state merged \
+            --base "$DEFAULT_BRANCH" \
+            --head "$BRANCH" \
+            --limit 10 \
+            --json number,title,mergeCommit,mergedAt)"
+
+          MERGE_SHA="$(PR_JSON="$PR_JSON" EXPECTED_TITLE="$EXPECTED_TITLE" python - <<'PY'
+          import json
+          import os
+          import sys
+
+          prs = json.loads(os.environ["PR_JSON"])
+          expected = os.environ["EXPECTED_TITLE"]
+          matches = [pr for pr in prs if pr.get("title") == expected and pr.get("mergeCommit", {}).get("oid")]
+          if len(matches) != 1:
+              print(f"expected exactly one merged release PR titled {expected!r}, got {len(matches)}", file=sys.stderr)
+              raise SystemExit(2)
+          print(matches[0]["mergeCommit"]["oid"])
+          PY
+          )"
+
+          echo "branch=${BRANCH}" >> "$GITHUB_OUTPUT"
+          echo "merge_sha=${MERGE_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout exact release commit
+        shell: bash
+        env:
+          MERGE_SHA: ${{ steps.release-pr.outputs.merge_sha }}
+        run: |
+          set -euo pipefail
+          git -C target checkout --detach "$MERGE_SHA"
+
+      - name: Verify release metadata
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          python scripts/release.py \
+            --config config/release.json \
+            verify \
+            --repo-dir target \
+            --version "$VERSION"
+
+      - name: Run Harness Integrity validator
+        working-directory: target
+        run: python3 tools/harness/validate.py --mode ci
+
+      - name: Create or verify release tag
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+          MERGE_SHA: ${{ steps.release-pr.outputs.merge_sha }}
+        run: |
+          set -euo pipefail
+
+          REMOTE_SHA="$(git -C target ls-remote origin "refs/tags/${VERSION}" | awk '{print $1}')"
+          if [[ -n "$REMOTE_SHA" ]]; then
+            if [[ "$REMOTE_SHA" != "$MERGE_SHA" ]]; then
+              echo "Tag ${VERSION} already exists on ${REMOTE_SHA}, expected ${MERGE_SHA}." >&2
+              exit 1
+            fi
+            echo "Tag ${VERSION} already points to the expected release commit."
+          else
+            git -C target tag "$VERSION" "$MERGE_SHA"
+            git -C target push origin "refs/tags/${VERSION}"
+          fi
+
+      - name: Create or verify GitHub Release
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+          TITLE: ${{ inputs.title }}
+          TARGET_REPOSITORY: ${{ steps.config.outputs.target_repository }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+
+          if gh release view "$VERSION" --repo "$TARGET_REPOSITORY" --json name,isDraft,isPrerelease >/tmp/release.json 2>/dev/null; then
+            EXISTING_TITLE="$(python -c 'import json; print(json.load(open("/tmp/release.json"))["name"])')"
+            if [[ "$EXISTING_TITLE" != "$TITLE" ]]; then
+              echo "Release ${VERSION} already exists with title '${EXISTING_TITLE}', expected '${TITLE}'." >&2
+              exit 1
+            fi
+            echo "Release ${VERSION} already exists with the expected title. Nothing to do."
+            exit 0
+          fi
+
+          gh release create "$VERSION" \
+            --repo "$TARGET_REPOSITORY" \
+            --title "$TITLE" \
+            --generate-notes \
+            --verify-tag \
+            --latest
