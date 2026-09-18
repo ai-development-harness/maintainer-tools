@@ -1,0 +1,185 @@
+name: Prepare Harness Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Новый release tag, например v0.2.7"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: harness-release
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout maintainer tools
+        uses: actions/checkout@v7
+
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Read release config
+        id: config
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          config = json.loads(Path("config/release.json").read_text(encoding="utf-8"))
+          owner, name = config["targetRepository"].split("/", 1)
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              print(f"target_repository={config['targetRepository']}", file=out)
+              print(f"owner={owner}", file=out)
+              print(f"repository_name={name}", file=out)
+              print(f"default_branch={config['defaultBranch']}", file=out)
+              print(f"branch_prefix={config['releaseBranchPrefix']}", file=out)
+          PY
+
+      - name: Create scoped GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.HARNESS_RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.HARNESS_RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ steps.config.outputs.owner }}
+          repositories: ${{ steps.config.outputs.repository_name }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Checkout Harness source repository
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ steps.config.outputs.target_repository }}
+          ref: ${{ steps.config.outputs.default_branch }}
+          token: ${{ steps.app-token.outputs.token }}
+          path: target
+          fetch-depth: 0
+
+      - name: Preflight
+        id: preflight
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+          TARGET_REPOSITORY: ${{ steps.config.outputs.target_repository }}
+          DEFAULT_BRANCH: ${{ steps.config.outputs.default_branch }}
+          BRANCH_PREFIX: ${{ steps.config.outputs.branch_prefix }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+
+          CURRENT="$(python scripts/release.py --config config/release.json current --repo-dir target)"
+          BRANCH="${BRANCH_PREFIX}${VERSION}"
+
+          if git -C target ls-remote --exit-code --tags origin "refs/tags/${VERSION}" >/dev/null 2>&1; then
+            echo "Release tag ${VERSION} already exists." >&2
+            exit 1
+          fi
+
+          if gh release view "${VERSION}" --repo "${TARGET_REPOSITORY}" >/dev/null 2>&1; then
+            echo "GitHub Release ${VERSION} already exists." >&2
+            exit 1
+          fi
+
+          if git -C target ls-remote --exit-code --heads origin "refs/heads/${BRANCH}" >/dev/null 2>&1; then
+            echo "Release branch ${BRANCH} already exists." >&2
+            exit 1
+          fi
+
+          echo "current=${CURRENT}" >> "$GITHUB_OUTPUT"
+          echo "branch=${BRANCH}" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare metadata
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          python scripts/release.py \
+            --config config/release.json \
+            prepare \
+            --repo-dir target \
+            --version "$VERSION"
+
+      - name: Verify prepared metadata
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          python scripts/release.py \
+            --config config/release.json \
+            verify \
+            --repo-dir target \
+            --version "$VERSION"
+
+      - name: Run Harness Integrity validator
+        working-directory: target
+        run: python3 tools/harness/validate.py --mode ci
+
+      - name: Commit and push release branch
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+          BRANCH: ${{ steps.preflight.outputs.branch }}
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+
+          BOT_ID="$(gh api "/users/${APP_SLUG}[bot]" --jq .id)"
+          git -C target config user.name "${APP_SLUG}[bot]"
+          git -C target config user.email "${BOT_ID}+${APP_SLUG}[bot]@users.noreply.github.com"
+
+          git -C target switch -c "$BRANCH"
+          git -C target add \
+            .project/manifest.yaml \
+            .project/harness.lock.json \
+            .project/harness-update-graph.json
+
+          if git -C target diff --cached --quiet; then
+            echo "Release preparation produced no metadata diff." >&2
+            exit 1
+          fi
+
+          git -C target commit -m "chore: подготовить release ${VERSION}"
+          git -C target push origin "HEAD:refs/heads/${BRANCH}"
+
+      - name: Create release pull request
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+          CURRENT: ${{ steps.preflight.outputs.current }}
+          BRANCH: ${{ steps.preflight.outputs.branch }}
+          TARGET_REPOSITORY: ${{ steps.config.outputs.target_repository }}
+          DEFAULT_BRANCH: ${{ steps.config.outputs.default_branch }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+
+          cat > /tmp/release-pr.md <<EOF
+          ## Release preparation
+
+          Автоматически подготовлены machine-readable metadata для Harness ${VERSION}.
+
+          - current canonical release: \`${CURRENT}\`;
+          - target release: \`${VERSION}\`;
+          - manifest, lock и update graph синхронизированы;
+          - Harness Integrity validator пройден до создания PR;
+          - tag/release **не создаются** этим workflow.
+
+          После review и squash merge этого PR запусти workflow **Publish Harness Release** с тем же version.
+          EOF
+
+          gh pr create \
+            --repo "$TARGET_REPOSITORY" \
+            --base "$DEFAULT_BRANCH" \
+            --head "$BRANCH" \
+            --title "chore: подготовить release ${VERSION}" \
+            --body-file /tmp/release-pr.md
