@@ -1,1 +1,215 @@
-# maintainer-tools
+# AI Development Harness — Maintainer Tools
+
+Служебный control plane для сопровождения **самого AI Development Harness**. Он отделён от [`ai-development-harness-template`](https://github.com/ai-development-harness/ai-development-harness-template), поэтому maintainer-only workflow не копируются в пользовательские проекты.
+
+## Release flow
+
+Обычный merge PR в `main` **не выпускает релиз**. Релиз состоит из двух ручных workflow:
+
+```text
+обычные PR → main
+              │
+              ▼
+      Prepare Harness Release
+              │
+              ▼
+       release/vX.Y.Z + PR
+              │
+        review / squash merge
+              │
+              ▼
+      Publish Harness Release
+              │
+              ▼
+       tag vX.Y.Z + GitHub Release
+```
+
+### Prepare Harness Release
+
+`.github/workflows/prepare-release.yml`:
+
+1. проверяет, что текущие `manifest / lock / update graph` согласованы;
+2. проверяет отсутствие target tag, Release и release branch;
+3. через `scripts/release.py` обновляет:
+   - `.project/manifest.yaml → harness.release`;
+   - `.project/harness.lock.json → release/source.ref`;
+   - `.project/harness-update-graph.json → latest`;
+   - transition `current → target`;
+4. запускает Harness validator;
+5. создаёт `release/vX.Y.Z`;
+6. открывает PR `chore: подготовить release vX.Y.Z`.
+
+Tag и GitHub Release здесь **не создаются**.
+
+### Publish Harness Release
+
+`.github/workflows/publish-release.yml` запускается после merge release PR.
+
+Он находит именно merged PR `release/vX.Y.Z`, берёт его merge commit, повторно проверяет metadata/validator и только затем создаёт lightweight tag и GitHub Release.
+
+Tag привязывается **не к текущему `main HEAD`**, а к merge commit release PR. Поэтому PR, случайно влитый после подготовки релиза, не попадёт в уже подготовленный release.
+
+Publish идемпотентен для частичного сбоя: существующий tag допустим только если уже указывает на ожидаемый commit; существующий Release допустим только с ожидаемым названием.
+
+## Конфигурация
+
+Target repository и пути metadata находятся в:
+
+```text
+config/release.json
+```
+
+Deterministic helper:
+
+```bash
+python scripts/release.py --config config/release.json current --repo-dir <repo>
+python scripts/release.py --config config/release.json prepare --repo-dir <repo> --version vX.Y.Z
+python scripts/release.py --config config/release.json verify --repo-dir <repo> --version vX.Y.Z
+```
+
+Helper использует только Python standard library.
+
+Важно: `prepare` **не исправляет автоматически уже повреждённое release-state**. Если manifest, lock и graph расходятся, workflow блокируется; для такого случая нужен отдельный recovery PR.
+
+## Первичная настройка
+
+### 1. GitHub App
+
+Создай GitHub App, например:
+
+```text
+AI Harness Release Bot
+```
+
+Repository permissions:
+
+| Permission | Access |
+|---|---|
+| Contents | Read & write |
+| Pull requests | Read & write |
+| Metadata | Read-only |
+
+Webhook не требуется.
+
+Установи App в организации `ai-development-harness` только на:
+
+```text
+ai-development-harness-template
+```
+
+### 2. Private key
+
+Создай private key App и сохрани **полное PEM-содержимое** в secret репозитория `maintainer-tools`:
+
+```text
+HARNESS_RELEASE_APP_PRIVATE_KEY
+```
+
+### 3. Client ID
+
+В:
+
+```text
+maintainer-tools
+→ Settings
+→ Secrets and variables
+→ Actions
+→ Variables
+```
+
+создай:
+
+```text
+HARNESS_RELEASE_APP_CLIENT_ID
+```
+
+Значение — **Client ID**, не legacy App ID.
+
+Workflow получает короткоживущий installation token через `actions/create-github-app-token@v3` и дополнительно scope-ит его на target repository.
+
+### 4. Immutable releases
+
+В `ai-development-harness-template` рекомендуется оставить:
+
+```text
+Settings → Releases → Enable release immutability
+```
+
+## Использование
+
+Допустим, текущий release `v0.2.6`, нужен `v0.2.7`.
+
+**1. Prepare**
+
+```text
+maintainer-tools
+→ Actions
+→ Prepare Harness Release
+→ Run workflow
+
+version: v0.2.7
+```
+
+Появится release PR в `ai-development-harness-template`. Проверь diff и CI.
+
+**2. Merge**
+
+Сделай обычный **Squash and merge** release PR. Tag/Release вручную не создавай.
+
+**3. Publish**
+
+```text
+maintainer-tools
+→ Actions
+→ Publish Harness Release
+→ Run workflow
+
+version: v0.2.7
+title:   v0.2.7 — Release title
+```
+
+Workflow найдёт merge commit release PR и только после повторной проверки создаст tag + Release.
+
+## Failure policy
+
+- Нет merged release PR → publish блокируется.
+- Metadata не соответствует requested version → publish блокируется до создания tag.
+- Tag существует на другом commit → tag не перемещается.
+- Release branch/tag/release уже существует при Prepare → overwrite не выполняется.
+- Текущий release-state неконсистентен → Prepare блокируется и требует recovery PR.
+
+## Проверки maintainer-tools
+
+```bash
+python -m unittest discover -s tests -v
+python -m py_compile scripts/release.py
+```
+
+То же выполняет `.github/workflows/ci.yml`.
+
+## Структура
+
+```text
+.github/workflows/ci.yml
+.github/workflows/prepare-release.yml
+.github/workflows/publish-release.yml
+config/release.json
+scripts/release.py
+tests/test_release.py
+```
+
+## Главное правило
+
+Релиз Harness больше не начинается с **Draft a new release**.
+
+Сначала:
+
+```text
+Prepare Harness Release
+```
+
+после review/merge:
+
+```text
+Publish Harness Release
+```
