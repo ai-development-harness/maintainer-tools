@@ -75,6 +75,12 @@ Helper использует только Python standard library.
 
 ### 1. GitHub App
 
+Открой страницу создания App в организации:
+
+- [Create a new GitHub App для `ai-development-harness`](https://github.com/organizations/ai-development-harness/settings/apps/new)
+- [Список GitHub Apps организации](https://github.com/organizations/ai-development-harness/settings/apps)
+- [Документация GitHub: Creating GitHub Apps](https://docs.github.com/en/apps/creating-github-apps)
+
 Создай GitHub App, например:
 
 ```text
@@ -91,49 +97,66 @@ Repository permissions:
 
 Webhook не требуется.
 
-Установи App в организации `ai-development-harness` только на:
+После создания установи App в организации `ai-development-harness` **только** на:
 
 ```text
 ai-development-harness-template
 ```
 
+Инструкция GitHub:
+
+- [Installing your own GitHub App](https://docs.github.com/en/apps/using-github-apps/installing-your-own-github-app)
+- [Choosing permissions for a GitHub App](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/choosing-permissions-for-a-github-app)
+
 ### 2. Private key
 
-Создай private key App и сохрани **полное PEM-содержимое** в secret репозитория `maintainer-tools`:
+На странице настроек созданного GitHub App в секции **Private keys** нажми **Generate a private key**.
+
+Документация:
+
+- [Managing private keys for GitHub Apps](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/managing-private-keys-for-github-apps)
+
+Затем открой страницу repository secrets:
+
+- [`maintainer-tools → Actions secrets`](https://github.com/ai-development-harness/maintainer-tools/settings/secrets/actions)
+- [Документация GitHub: Using secrets in GitHub Actions](https://docs.github.com/en/actions/how-tos/write-workflows/choose-what-workflows-do/use-secrets)
+
+Создай repository secret:
 
 ```text
 HARNESS_RELEASE_APP_PRIVATE_KEY
 ```
 
+В значение вставь **полное содержимое скачанного PEM-файла**, включая строки `BEGIN ... PRIVATE KEY` и `END ... PRIVATE KEY`.
+
 ### 3. Client ID
 
-В:
+Client ID находится на странице настроек созданного GitHub App. Это **Client ID**, не legacy App ID.
 
-```text
-maintainer-tools
-→ Settings
-→ Secrets and variables
-→ Actions
-→ Variables
-```
+Открой страницу repository variables:
 
-создай:
+- [`maintainer-tools → Actions variables`](https://github.com/ai-development-harness/maintainer-tools/settings/variables/actions)
+- [Документация GitHub: Store information in variables](https://docs.github.com/en/actions/how-tos/write-workflows/choose-what-workflows-do/use-variables)
+
+Создай repository variable:
 
 ```text
 HARNESS_RELEASE_APP_CLIENT_ID
 ```
 
-Значение — **Client ID**, не legacy App ID.
-
 Workflow получает короткоживущий installation token через `actions/create-github-app-token@v3` и дополнительно scope-ит его на target repository.
+
+Подробности официального сценария GitHub App + Actions:
+
+- [Making authenticated API requests with a GitHub App in a GitHub Actions workflow](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/making-authenticated-api-requests-with-a-github-app-in-a-github-actions-workflow)
 
 ### 4. Immutable releases
 
-В `ai-development-harness-template` рекомендуется оставить:
+Для `ai-development-harness-template` рекомендуется оставить включённой release immutability.
 
-```text
-Settings → Releases → Enable release immutability
-```
+Документация:
+
+- [Preventing changes to releases](https://docs.github.com/en/code-security/how-tos/secure-your-supply-chain/establish-provenance-and-integrity/prevent-release-changes)
 
 ## Использование
 
@@ -141,12 +164,13 @@ Settings → Releases → Enable release immutability
 
 **1. Prepare**
 
-```text
-maintainer-tools
-→ Actions
-→ Prepare Harness Release
-→ Run workflow
+Открой:
 
+- [Prepare Harness Release](https://github.com/ai-development-harness/maintainer-tools/actions/workflows/prepare-release.yml)
+
+и нажми **Run workflow**:
+
+```text
 version: v0.2.7
 ```
 
@@ -158,12 +182,13 @@ version: v0.2.7
 
 **3. Publish**
 
-```text
-maintainer-tools
-→ Actions
-→ Publish Harness Release
-→ Run workflow
+Открой:
 
+- [Publish Harness Release](https://github.com/ai-development-harness/maintainer-tools/actions/workflows/publish-release.yml)
+
+и нажми **Run workflow**:
+
+```text
 version: v0.2.7
 title:   v0.2.7 — Release title
 ```
