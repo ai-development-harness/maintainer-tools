@@ -1,0 +1,8 @@
+{
+  "targetRepository": "ai-development-harness/ai-development-harness-template",
+  "defaultBranch": "main",
+  "releaseBranchPrefix": "release/",
+  "manifestPath": ".project/manifest.yaml",
+  "lockPath": ".project/harness.lock.json",
+  "updateGraphPath": ".project/harness-update-graph.json"
+}
