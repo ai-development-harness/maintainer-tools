@@ -70,7 +70,7 @@ jobs:
           path: target
           fetch-depth: 0
 
-      - name: Resolve merged release PR
+      - name: Resolve release PR
         id: release-pr
         shell: bash
         env:
@@ -87,11 +87,11 @@ jobs:
 
           PR_JSON="$(gh pr list \
             --repo "$TARGET_REPOSITORY" \
-            --state merged \
+            --state all \
             --base "$DEFAULT_BRANCH" \
             --head "$BRANCH" \
             --limit 10 \
-            --json number,title,mergeCommit,mergedAt)"
+            --json number,title,url,state,mergeCommit,mergedAt)"
 
           MERGE_SHA="$(PR_JSON="$PR_JSON" EXPECTED_TITLE="$EXPECTED_TITLE" python - <<'PY'
           import json
@@ -100,11 +100,26 @@ jobs:
 
           prs = json.loads(os.environ["PR_JSON"])
           expected = os.environ["EXPECTED_TITLE"]
-          matches = [pr for pr in prs if pr.get("title") == expected and pr.get("mergeCommit", {}).get("oid")]
+          matches = [pr for pr in prs if pr.get("title") == expected]
+
           if len(matches) != 1:
-              print(f"expected exactly one merged release PR titled {expected!r}, got {len(matches)}", file=sys.stderr)
+              print(
+                  f"expected exactly one release PR titled {expected!r}, got {len(matches)}",
+                  file=sys.stderr,
+              )
               raise SystemExit(2)
-          print(matches[0]["mergeCommit"]["oid"])
+
+          pr = matches[0]
+          merge_sha = (pr.get("mergeCommit") or {}).get("oid")
+          if not pr.get("mergedAt") or not merge_sha:
+              print(
+                  f"release PR #{pr.get('number')} is not merged yet: {pr.get('url')}\n"
+                  "Review it, use Squash and merge, then run Publish Harness Release again.",
+                  file=sys.stderr,
+              )
+              raise SystemExit(2)
+
+          print(merge_sha)
           PY
           )"
 
