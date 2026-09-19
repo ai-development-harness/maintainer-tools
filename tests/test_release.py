@@ -130,12 +130,30 @@ class ReleaseHelperTest(unittest.TestCase):
         lock["release"] = "0.2.3"
         lock_path.write_text(json.dumps(lock), encoding="utf-8")
 
-        args = type("Args", (), {"config": self.config_path, "repo_dir": self.root, "version": "v0.2.5"})()
+        args = type(
+            "Args",
+            (),
+            {
+                "config": self.config_path,
+                "repo_dir": self.root,
+                "version": "v0.2.5",
+                "reload_required": False,
+            },
+        )()
         with self.assertRaises(release.ReleaseError):
             release.command_prepare(args)
 
     def test_prepare_rejects_non_increasing_version(self) -> None:
-        args = type("Args", (), {"config": self.config_path, "repo_dir": self.root, "version": "v0.2.4"})()
+        args = type(
+            "Args",
+            (),
+            {
+                "config": self.config_path,
+                "repo_dir": self.root,
+                "version": "v0.2.4",
+                "reload_required": False,
+            },
+        )()
         with self.assertRaises(release.ReleaseError):
             release.command_prepare(args)
 
