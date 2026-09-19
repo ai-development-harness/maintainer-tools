@@ -190,8 +190,16 @@ def command_prepare(args: argparse.Namespace) -> None:
     write_json(lock_path, lock)
 
     graph["latest"] = target
+    # reloadRequired — осознанное свойство перехода между релизами.
+    # Helper не пытается угадывать его по diff: maintainer задаёт флаг явно
+    # при Prepare Harness Release.
     graph["transitions"].append(
-        {"from": current, "to": target, "kind": "standard", "reloadRequired": False}
+        {
+            "from": current,
+            "to": target,
+            "kind": "standard",
+            "reloadRequired": bool(args.reload_required),
+        }
     )
     validate_graph(graph)
     write_json(graph_path, graph)
@@ -222,6 +230,12 @@ def parser() -> argparse.ArgumentParser:
         cmd.add_argument("--repo-dir", type=Path, required=True)
         if name != "current":
             cmd.add_argument("--version", required=True)
+        if name == "prepare":
+            cmd.add_argument(
+                "--reload-required",
+                action="store_true",
+                help="Пометить новый release transition как требующий reload updater/runtime.",
+            )
         cmd.set_defaults(handler=handler)
     return root
 
