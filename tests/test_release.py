@@ -78,7 +78,16 @@ class ReleaseHelperTest(unittest.TestCase):
         self.assertEqual(current, "v0.2.4")
 
     def test_prepare_updates_manifest_lock_and_graph(self) -> None:
-        args = type("Args", (), {"config": self.config_path, "repo_dir": self.root, "version": "v0.2.5"})()
+        args = type(
+            "Args",
+            (),
+            {
+                "config": self.config_path,
+                "repo_dir": self.root,
+                "version": "v0.2.5",
+                "reload_required": False,
+            },
+        )()
         release.command_prepare(args)
 
         current, lock, graph = release.state(self.root, self.config)
@@ -91,18 +100,60 @@ class ReleaseHelperTest(unittest.TestCase):
             {"from": "v0.2.4", "to": "v0.2.5", "kind": "standard", "reloadRequired": False},
         )
 
+    def test_prepare_can_require_reload(self) -> None:
+        args = type(
+            "Args",
+            (),
+            {
+                "config": self.config_path,
+                "repo_dir": self.root,
+                "version": "v0.2.5",
+                "reload_required": True,
+            },
+        )()
+        release.command_prepare(args)
+
+        _, _, graph = release.state(self.root, self.config)
+        self.assertEqual(
+            graph["transitions"][-1],
+            {
+                "from": "v0.2.4",
+                "to": "v0.2.5",
+                "kind": "standard",
+                "reloadRequired": True,
+            },
+        )
+
     def test_prepare_rejects_inconsistent_current_metadata(self) -> None:
         lock_path = self.root / ".project" / "harness.lock.json"
         lock = json.loads(lock_path.read_text(encoding="utf-8"))
         lock["release"] = "0.2.3"
         lock_path.write_text(json.dumps(lock), encoding="utf-8")
 
-        args = type("Args", (), {"config": self.config_path, "repo_dir": self.root, "version": "v0.2.5"})()
+        args = type(
+            "Args",
+            (),
+            {
+                "config": self.config_path,
+                "repo_dir": self.root,
+                "version": "v0.2.5",
+                "reload_required": False,
+            },
+        )()
         with self.assertRaises(release.ReleaseError):
             release.command_prepare(args)
 
     def test_prepare_rejects_non_increasing_version(self) -> None:
-        args = type("Args", (), {"config": self.config_path, "repo_dir": self.root, "version": "v0.2.4"})()
+        args = type(
+            "Args",
+            (),
+            {
+                "config": self.config_path,
+                "repo_dir": self.root,
+                "version": "v0.2.4",
+                "reload_required": False,
+            },
+        )()
         with self.assertRaises(release.ReleaseError):
             release.command_prepare(args)
 

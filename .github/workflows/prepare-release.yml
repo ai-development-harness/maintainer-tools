@@ -7,6 +7,11 @@ on:
         description: "Новый release tag, например v0.2.7"
         required: true
         type: string
+      reload_required:
+        description: "Нужен ли новый запуск updater/runtime после применения перехода"
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -102,12 +107,21 @@ jobs:
       - name: Prepare metadata
         env:
           VERSION: ${{ inputs.version }}
+          RELOAD_REQUIRED: ${{ inputs.reload_required }}
         run: |
+          set -euo pipefail
+
+          EXTRA_ARGS=()
+          if [[ "$RELOAD_REQUIRED" == "true" ]]; then
+            EXTRA_ARGS+=(--reload-required)
+          fi
+
           python scripts/release.py \
             --config config/release.json \
             prepare \
             --repo-dir target \
-            --version "$VERSION"
+            --version "$VERSION" \
+            "${EXTRA_ARGS[@]}"
 
       - name: Verify prepared metadata
         env:
@@ -171,6 +185,7 @@ jobs:
           - current canonical release: \`${CURRENT}\`;
           - target release: \`${VERSION}\`;
           - manifest, lock и update graph синхронизированы;
+          - transition `${CURRENT} → ${VERSION}`: `reloadRequired=${{ inputs.reload_required }}`;
           - Harness Integrity validator пройден до создания PR;
           - tag/release **не создаются** этим workflow.
 
