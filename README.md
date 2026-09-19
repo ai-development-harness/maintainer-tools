@@ -34,7 +34,7 @@
    - `.project/manifest.yaml → harness.release`;
    - `.project/harness.lock.json → release/source.ref`;
    - `.project/harness-update-graph.json → latest`;
-   - transition `current → target`;
+   - transition `current → target` с явно заданным `reloadRequired`;
 4. запускает Harness validator;
 5. создаёт `release/vX.Y.Z`;
 6. открывает PR `chore: подготовить release vX.Y.Z`.
@@ -64,6 +64,7 @@ Deterministic helper:
 ```bash
 python scripts/release.py --config config/release.json current --repo-dir <repo>
 python scripts/release.py --config config/release.json prepare --repo-dir <repo> --version vX.Y.Z
+python scripts/release.py --config config/release.json prepare --repo-dir <repo> --version vX.Y.Z --reload-required
 python scripts/release.py --config config/release.json verify --repo-dir <repo> --version vX.Y.Z
 ```
 
@@ -171,10 +172,27 @@ Workflow получает короткоживущий installation token чер
 и нажми **Run workflow**:
 
 ```text
-version: v0.2.7
+version:         v0.2.7
+reload_required: false
 ```
 
 Появится release PR в `ai-development-harness-template`. Проверь diff и CI.
+
+`reload_required` задаёт свойство **нового transition**, а не поведение самого workflow. Release helper намеренно не пытается угадать необходимость reload по diff.
+
+Обычно:
+
+```text
+reload_required: false
+```
+
+Если после применения release старый updater/runtime нельзя безопасно продолжать в той же session, укажи:
+
+```text
+reload_required: true
+```
+
+Например для breaking protocol release, меняющего сам command interface.
 
 **2. Merge**
 
