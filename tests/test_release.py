@@ -78,7 +78,16 @@ class ReleaseHelperTest(unittest.TestCase):
         self.assertEqual(current, "v0.2.4")
 
     def test_prepare_updates_manifest_lock_and_graph(self) -> None:
-        args = type("Args", (), {"config": self.config_path, "repo_dir": self.root, "version": "v0.2.5"})()
+        args = type(
+            "Args",
+            (),
+            {
+                "config": self.config_path,
+                "repo_dir": self.root,
+                "version": "v0.2.5",
+                "reload_required": False,
+            },
+        )()
         release.command_prepare(args)
 
         current, lock, graph = release.state(self.root, self.config)
@@ -89,6 +98,30 @@ class ReleaseHelperTest(unittest.TestCase):
         self.assertEqual(
             graph["transitions"][-1],
             {"from": "v0.2.4", "to": "v0.2.5", "kind": "standard", "reloadRequired": False},
+        )
+
+    def test_prepare_can_require_reload(self) -> None:
+        args = type(
+            "Args",
+            (),
+            {
+                "config": self.config_path,
+                "repo_dir": self.root,
+                "version": "v0.2.5",
+                "reload_required": True,
+            },
+        )()
+        release.command_prepare(args)
+
+        _, _, graph = release.state(self.root, self.config)
+        self.assertEqual(
+            graph["transitions"][-1],
+            {
+                "from": "v0.2.4",
+                "to": "v0.2.5",
+                "kind": "standard",
+                "reloadRequired": True,
+            },
         )
 
     def test_prepare_rejects_inconsistent_current_metadata(self) -> None:
