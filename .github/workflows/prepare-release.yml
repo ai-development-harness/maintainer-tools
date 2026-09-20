@@ -185,7 +185,7 @@ jobs:
           - current canonical release: \`${CURRENT}\`;
           - target release: \`${VERSION}\`;
           - manifest, lock и update graph синхронизированы;
-          - transition `${CURRENT} → ${VERSION}`: `reloadRequired=${{ inputs.reload_required }}`;
+          - transition \`${CURRENT} → ${VERSION}\`: \`reloadRequired=${{ inputs.reload_required }}\`;
           - Harness Integrity validator пройден до создания PR;
           - tag/release **не создаются** этим workflow.
 
