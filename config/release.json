@@ -2,7 +2,20 @@
   "targetRepository": "ai-development-harness/ai-development-harness-template",
   "defaultBranch": "main",
   "releaseBranchPrefix": "release/",
-  "manifestPath": ".project/manifest.yaml",
-  "lockPath": ".project/harness.lock.json",
-  "updateGraphPath": ".project/harness-update-graph.json"
+  "layouts": [
+    {
+      "name": "harness",
+      "manifestPath": ".harness/manifest.yaml",
+      "lockPath": ".harness/harness.lock.json",
+      "updateGraphPath": ".harness/harness-update-graph.json",
+      "validatorPath": ".harness/tools/validate.py"
+    },
+    {
+      "name": "legacy-project",
+      "manifestPath": ".project/manifest.yaml",
+      "lockPath": ".project/harness.lock.json",
+      "updateGraphPath": ".project/harness-update-graph.json",
+      "validatorPath": "tools/harness/validate.py"
+    }
+  ]
 }
