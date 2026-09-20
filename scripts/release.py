@@ -10,6 +10,14 @@ import sys
 
 SEMVER_RE = re.compile(r"^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
 
+LAYOUT_KEYS = {
+    "name",
+    "manifestPath",
+    "lockPath",
+    "updateGraphPath",
+    "validatorPath",
+}
+
 
 class ReleaseError(RuntimeError):
     pass
@@ -38,27 +46,104 @@ def write_json(path: Path, value: dict) -> None:
     path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
+def _validate_layout(layout: object, index: int) -> dict:
+    if not isinstance(layout, dict):
+        raise ReleaseError(f"config layouts[{index}] must be an object")
+    missing = sorted(LAYOUT_KEYS - layout.keys())
+    if missing:
+        raise ReleaseError(f"config layouts[{index}] missing keys: {', '.join(missing)}")
+    for key in LAYOUT_KEYS:
+        if not isinstance(layout[key], str) or not layout[key].strip():
+            raise ReleaseError(f"config layouts[{index}].{key} must be a non-empty string")
+    return layout
+
+
 def load_config(path: Path) -> dict:
     config = read_json(path)
     required = {
         "targetRepository",
         "defaultBranch",
         "releaseBranchPrefix",
-        "manifestPath",
-        "lockPath",
-        "updateGraphPath",
     }
     missing = sorted(required - config.keys())
     if missing:
         raise ReleaseError(f"config missing keys: {', '.join(missing)}")
+
+    layouts = config.get("layouts")
+    if layouts is None:
+        legacy_keys = {"manifestPath", "lockPath", "updateGraphPath"}
+        legacy_missing = sorted(legacy_keys - config.keys())
+        if legacy_missing:
+            raise ReleaseError(
+                "config must define non-empty layouts[] or legacy keys: "
+                + ", ".join(sorted(legacy_keys))
+            )
+        config["layouts"] = [
+            {
+                "name": "configured",
+                "manifestPath": config["manifestPath"],
+                "lockPath": config["lockPath"],
+                "updateGraphPath": config["updateGraphPath"],
+                "validatorPath": config.get("validatorPath", "tools/harness/validate.py"),
+            }
+        ]
+    elif not isinstance(layouts, list) or not layouts:
+        raise ReleaseError("config layouts must be a non-empty array")
+
+    names: set[str] = set()
+    normalized = []
+    for index, layout in enumerate(config["layouts"]):
+        checked = _validate_layout(layout, index)
+        if checked["name"] in names:
+            raise ReleaseError(f"config layout name is duplicated: {checked['name']}")
+        names.add(checked["name"])
+        normalized.append(dict(checked))
+    config["layouts"] = normalized
     return config
 
 
+def resolve_layout(repo: Path, config: dict) -> dict:
+    """Resolve exactly one complete release layout.
+
+    Layout selection is intentionally based on the repository contents rather than
+    release version. This lets maintainer-tools operate before and after a Harness
+    namespace migration without teaching the release workflow version-specific rules.
+    """
+
+    complete: list[dict] = []
+    diagnostics: list[str] = []
+
+    for layout in config["layouts"]:
+        required_paths = [
+            layout["manifestPath"],
+            layout["lockPath"],
+            layout["updateGraphPath"],
+            layout["validatorPath"],
+        ]
+        missing = [path for path in required_paths if not (repo / path).is_file()]
+        if not missing:
+            complete.append(layout)
+            diagnostics.append(f"{layout['name']}: complete")
+        else:
+            diagnostics.append(f"{layout['name']}: missing {', '.join(missing)}")
+
+    if len(complete) == 1:
+        return complete[0]
+    if len(complete) > 1:
+        names = ", ".join(layout["name"] for layout in complete)
+        raise ReleaseError(
+            "ambiguous release layout: multiple complete layouts found: "
+            f"{names}. Remove the obsolete layout before releasing."
+        )
+    raise ReleaseError("no complete release layout found; " + "; ".join(diagnostics))
+
+
 def paths(repo: Path, config: dict) -> tuple[Path, Path, Path]:
+    layout = resolve_layout(repo, config)
     return (
-        repo / config["manifestPath"],
-        repo / config["lockPath"],
-        repo / config["updateGraphPath"],
+        repo / layout["manifestPath"],
+        repo / layout["lockPath"],
+        repo / layout["updateGraphPath"],
     )
 
 
@@ -160,6 +245,12 @@ def state(repo: Path, config: dict) -> tuple[str, dict, dict]:
     return manifest, lock, graph
 
 
+def command_layout(args: argparse.Namespace) -> None:
+    config = load_config(args.config)
+    layout = resolve_layout(args.repo_dir, config)
+    print(json.dumps(layout, ensure_ascii=False, sort_keys=True))
+
+
 def command_current(args: argparse.Namespace) -> None:
     config = load_config(args.config)
     current, _, _ = state(args.repo_dir, config)
@@ -225,10 +316,15 @@ def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(description=__doc__)
     root.add_argument("--config", type=Path, required=True)
     sub = root.add_subparsers(dest="command", required=True)
-    for name, handler in (("current", command_current), ("prepare", command_prepare), ("verify", command_verify)):
+    for name, handler in (
+        ("layout", command_layout),
+        ("current", command_current),
+        ("prepare", command_prepare),
+        ("verify", command_verify),
+    ):
         cmd = sub.add_parser(name)
         cmd.add_argument("--repo-dir", type=Path, required=True)
-        if name != "current":
+        if name in {"prepare", "verify"}:
             cmd.add_argument("--version", required=True)
         if name == "prepare":
             cmd.add_argument(
