@@ -134,6 +134,26 @@ jobs:
           set -euo pipefail
           git -C target checkout --detach "$MERGE_SHA"
 
+      - name: Resolve Harness release layout
+        id: layout
+        shell: bash
+        run: |
+          set -euo pipefail
+          LAYOUT_JSON="$(python scripts/release.py --config config/release.json layout --repo-dir target)"
+          LAYOUT_JSON="$LAYOUT_JSON" python - <<'PY'
+          import json
+          import os
+
+          layout = json.loads(os.environ["LAYOUT_JSON"])
+          mapping = {
+              "name": "name",
+              "validator_path": "validatorPath",
+          }
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              for output, key in mapping.items():
+                  print(f"{output}={layout[key]}", file=out)
+          PY
+
       - name: Verify release metadata
         env:
           VERSION: ${{ inputs.version }}
@@ -146,7 +166,7 @@ jobs:
 
       - name: Run Harness Integrity validator
         working-directory: target
-        run: python3 tools/harness/validate.py --mode ci
+        run: python3 "${{ steps.layout.outputs.validator_path }}" --mode ci
 
       - name: Create or verify release tag
         shell: bash
