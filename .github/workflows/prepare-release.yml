@@ -71,6 +71,29 @@ jobs:
           path: target
           fetch-depth: 0
 
+      - name: Resolve Harness release layout
+        id: layout
+        shell: bash
+        run: |
+          set -euo pipefail
+          LAYOUT_JSON="$(python scripts/release.py --config config/release.json layout --repo-dir target)"
+          LAYOUT_JSON="$LAYOUT_JSON" python - <<'PY'
+          import json
+          import os
+
+          layout = json.loads(os.environ["LAYOUT_JSON"])
+          mapping = {
+              "name": "name",
+              "manifest_path": "manifestPath",
+              "lock_path": "lockPath",
+              "graph_path": "updateGraphPath",
+              "validator_path": "validatorPath",
+          }
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              for output, key in mapping.items():
+                  print(f"{output}={layout[key]}", file=out)
+          PY
+
       - name: Preflight
         id: preflight
         shell: bash
@@ -135,7 +158,7 @@ jobs:
 
       - name: Run Harness Integrity validator
         working-directory: target
-        run: python3 tools/harness/validate.py --mode ci
+        run: python3 "${{ steps.layout.outputs.validator_path }}" --mode ci
 
       - name: Commit and push release branch
         shell: bash
@@ -144,6 +167,9 @@ jobs:
           BRANCH: ${{ steps.preflight.outputs.branch }}
           APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          MANIFEST_PATH: ${{ steps.layout.outputs.manifest_path }}
+          LOCK_PATH: ${{ steps.layout.outputs.lock_path }}
+          GRAPH_PATH: ${{ steps.layout.outputs.graph_path }}
         run: |
           set -euo pipefail
 
@@ -152,10 +178,7 @@ jobs:
           git -C target config user.email "${BOT_ID}+${APP_SLUG}[bot]@users.noreply.github.com"
 
           git -C target switch -c "$BRANCH"
-          git -C target add \
-            .project/manifest.yaml \
-            .project/harness.lock.json \
-            .project/harness-update-graph.json
+          git -C target add -- "$MANIFEST_PATH" "$LOCK_PATH" "$GRAPH_PATH"
 
           if git -C target diff --cached --quiet; then
             echo "Release preparation produced no metadata diff." >&2
@@ -171,6 +194,7 @@ jobs:
           VERSION: ${{ inputs.version }}
           CURRENT: ${{ steps.preflight.outputs.current }}
           BRANCH: ${{ steps.preflight.outputs.branch }}
+          LAYOUT: ${{ steps.layout.outputs.name }}
           TARGET_REPOSITORY: ${{ steps.config.outputs.target_repository }}
           DEFAULT_BRANCH: ${{ steps.config.outputs.default_branch }}
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
@@ -184,6 +208,7 @@ jobs:
 
           - current canonical release: \`${CURRENT}\`;
           - target release: \`${VERSION}\`;
+          - release layout: \`${LAYOUT}\`;
           - manifest, lock и update graph синхронизированы;
           - transition \`${CURRENT} → ${VERSION}\`: \`reloadRequired=${{ inputs.reload_required }}\`;
           - Harness Integrity validator пройден до создания PR;
