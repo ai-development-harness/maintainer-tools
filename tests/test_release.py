@@ -17,7 +17,6 @@ class ReleaseHelperTest(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
-        (self.root / ".project").mkdir()
         self.config_path = self.root / "config.json"
         self.config_path.write_text(
             json.dumps(
@@ -25,23 +24,59 @@ class ReleaseHelperTest(unittest.TestCase):
                     "targetRepository": "example/harness",
                     "defaultBranch": "main",
                     "releaseBranchPrefix": "release/",
-                    "manifestPath": ".project/manifest.yaml",
-                    "lockPath": ".project/harness.lock.json",
-                    "updateGraphPath": ".project/harness-update-graph.json",
+                    "layouts": [
+                        {
+                            "name": "harness",
+                            "manifestPath": ".harness/manifest.yaml",
+                            "lockPath": ".harness/harness.lock.json",
+                            "updateGraphPath": ".harness/harness-update-graph.json",
+                            "validatorPath": ".harness/tools/validate.py",
+                        },
+                        {
+                            "name": "legacy-project",
+                            "manifestPath": ".project/manifest.yaml",
+                            "lockPath": ".project/harness.lock.json",
+                            "updateGraphPath": ".project/harness-update-graph.json",
+                            "validatorPath": "tools/harness/validate.py",
+                        },
+                    ],
                 }
             ),
             encoding="utf-8",
         )
-        (self.root / ".project" / "manifest.yaml").write_text(
-            'harness:\n  version: "1"\n  release: "0.2.4"\n', encoding="utf-8"
+        self.write_layout(
+            ".project",
+            validator="tools/harness/validate.py",
+            release_version="0.2.4",
         )
-        (self.root / ".project" / "harness.lock.json").write_text(
+        self.config = release.load_config(self.config_path)
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    def write_layout(
+        self,
+        directory: str,
+        *,
+        validator: str,
+        release_version: str = "0.2.4",
+    ) -> None:
+        base = self.root / directory
+        base.mkdir(parents=True, exist_ok=True)
+        (base / "manifest.yaml").write_text(
+            f'harness:\n  version: "1"\n  release: "{release_version}"\n',
+            encoding="utf-8",
+        )
+        (base / "harness.lock.json").write_text(
             json.dumps(
                 {
                     "schemaVersion": 1,
                     "harnessVersion": "1",
-                    "release": "0.2.4",
-                    "source": {"repository": "example/harness", "ref": "v0.2.4"},
+                    "release": release_version,
+                    "source": {
+                        "repository": "example/harness",
+                        "ref": f"v{release_version}",
+                    },
                     "updatedAt": None,
                 },
                 indent=2,
@@ -49,15 +84,15 @@ class ReleaseHelperTest(unittest.TestCase):
             + "\n",
             encoding="utf-8",
         )
-        (self.root / ".project" / "harness-update-graph.json").write_text(
+        (base / "harness-update-graph.json").write_text(
             json.dumps(
                 {
                     "schemaVersion": 1,
-                    "latest": "v0.2.4",
+                    "latest": f"v{release_version}",
                     "transitions": [
                         {
                             "from": "v0.2.3",
-                            "to": "v0.2.4",
+                            "to": f"v{release_version}",
                             "kind": "standard",
                             "reloadRequired": False,
                         }
@@ -68,10 +103,53 @@ class ReleaseHelperTest(unittest.TestCase):
             + "\n",
             encoding="utf-8",
         )
-        self.config = release.load_config(self.config_path)
+        validator_path = self.root / validator
+        validator_path.parent.mkdir(parents=True, exist_ok=True)
+        validator_path.write_text("# validator fixture\n", encoding="utf-8")
 
-    def tearDown(self) -> None:
-        self.temp.cleanup()
+    def test_resolve_layout_accepts_legacy_layout(self) -> None:
+        layout = release.resolve_layout(self.root, self.config)
+        self.assertEqual(layout["name"], "legacy-project")
+
+    def test_resolve_layout_accepts_harness_layout(self) -> None:
+        for path in (
+            self.root / ".project",
+            self.root / "tools" / "harness" / "validate.py",
+        ):
+            if path.is_file():
+                path.unlink()
+            elif path.is_dir():
+                for child in sorted(path.rglob("*"), reverse=True):
+                    if child.is_file():
+                        child.unlink()
+                    elif child.is_dir():
+                        child.rmdir()
+                path.rmdir()
+
+        self.write_layout(
+            ".harness",
+            validator=".harness/tools/validate.py",
+            release_version="0.2.4",
+        )
+
+        layout = release.resolve_layout(self.root, self.config)
+        self.assertEqual(layout["name"], "harness")
+
+    def test_resolve_layout_rejects_ambiguous_complete_layouts(self) -> None:
+        self.write_layout(
+            ".harness",
+            validator=".harness/tools/validate.py",
+            release_version="0.2.4",
+        )
+
+        with self.assertRaisesRegex(release.ReleaseError, "multiple complete layouts"):
+            release.resolve_layout(self.root, self.config)
+
+    def test_resolve_layout_rejects_missing_layout(self) -> None:
+        (self.root / ".project" / "manifest.yaml").unlink()
+
+        with self.assertRaisesRegex(release.ReleaseError, "no complete release layout found"):
+            release.resolve_layout(self.root, self.config)
 
     def test_state_accepts_consistent_metadata(self) -> None:
         current, _, _ = release.state(self.root, self.config)
@@ -158,7 +236,15 @@ class ReleaseHelperTest(unittest.TestCase):
             release.command_prepare(args)
 
     def test_verify_requires_requested_version(self) -> None:
-        args = type("Args", (), {"config": self.config_path, "repo_dir": self.root, "version": "v0.2.5"})()
+        args = type(
+            "Args",
+            (),
+            {
+                "config": self.config_path,
+                "repo_dir": self.root,
+                "version": "v0.2.5",
+            },
+        )()
         with self.assertRaises(release.ReleaseError):
             release.command_verify(args)
 

@@ -30,12 +30,13 @@
 
 1. проверяет, что текущие `manifest / lock / update graph` согласованы;
 2. проверяет отсутствие target tag, Release и release branch;
-3. через `scripts/release.py` обновляет:
-   - `.project/manifest.yaml → harness.release`;
-   - `.project/harness.lock.json → release/source.ref`;
-   - `.project/harness-update-graph.json → latest`;
-   - transition `current → target` с явно заданным `reloadRequired`;
-4. запускает Harness validator;
+3. через `scripts/release.py` детерминированно определяет единственный полный release layout и обновляет его:
+   - новый layout: `.harness/manifest.yaml`, `.harness/harness.lock.json`, `.harness/harness-update-graph.json`;
+   - legacy layout: `.project/manifest.yaml`, `.project/harness.lock.json`, `.project/harness-update-graph.json`;
+   - manifest → `harness.release`;
+   - lock → `release/source.ref`;
+   - update graph → `latest` и transition `current → target` с явно заданным `reloadRequired`;
+4. запускает validator из того же resolved layout;
 5. создаёт `release/vX.Y.Z`;
 6. открывает PR `chore: подготовить release vX.Y.Z`.
 
@@ -53,15 +54,18 @@ Publish идемпотентен для частичного сбоя: суще�
 
 ## Конфигурация
 
-Target repository и пути metadata находятся в:
+Target repository и допустимые release layouts находятся в:
 
 ```text
 config/release.json
 ```
 
+Helper не выбирает layout по версии Harness и не использует fallback «наиболее похожего» каталога. Релиз разрешён только если в target repository найден **ровно один полный layout** (manifest + lock + update graph + validator). Если одновременно присутствуют оба layout или ни один не полон, операция блокируется.
+
 Deterministic helper:
 
 ```bash
+python scripts/release.py --config config/release.json layout --repo-dir <repo>
 python scripts/release.py --config config/release.json current --repo-dir <repo>
 python scripts/release.py --config config/release.json prepare --repo-dir <repo> --version vX.Y.Z
 python scripts/release.py --config config/release.json prepare --repo-dir <repo> --version vX.Y.Z --reload-required
