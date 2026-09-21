@@ -69,6 +69,7 @@ python scripts/release.py --config config/release.json layout --repo-dir <repo>
 python scripts/release.py --config config/release.json current --repo-dir <repo>
 python scripts/release.py --config config/release.json prepare --repo-dir <repo> --version vX.Y.Z
 python scripts/release.py --config config/release.json prepare --repo-dir <repo> --version vX.Y.Z --reload-required
+python scripts/release.py --config config/release.json prepare --repo-dir <repo> --version vX.Y.Z --reload-required --transition-kind bridge --transition-reason "<reason>"
 python scripts/release.py --config config/release.json verify --repo-dir <repo> --version vX.Y.Z
 ```
 
@@ -176,8 +177,10 @@ Workflow получает короткоживущий installation token чер
 и нажми **Run workflow**:
 
 ```text
-version:         v0.2.7
-reload_required: false
+version:           v0.2.7
+reload_required:   false
+transition_kind:   standard
+transition_reason:
 ```
 
 Появится release PR в `ai-development-harness-template`. Проверь diff и CI.
@@ -197,6 +200,22 @@ reload_required: true
 ```
 
 Например для breaking protocol release, меняющего сам command interface.
+
+Если переход является bootstrap/compatibility boundary, выбери:
+
+```text
+transition_kind:   bridge
+reload_required:   true
+transition_reason: <почему старый runtime не может безопасно продолжить>
+```
+
+Для первого release после `v0.5.3` это обязательный contract: deterministic updater
+появляется на границе `v0.5.3 → next`, поэтому переход должен быть `bridge` и
+требовать reload.
+
+Если в `config/release.json` указаны `updateGraphMirrors`, helper проверяет их
+равенство canonical update graph до prepare и синхронизирует их тем же content.
+Это используется для legacy compatibility routing endpoint.
 
 **2. Merge**
 

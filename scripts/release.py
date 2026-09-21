@@ -99,6 +99,15 @@ def load_config(path: Path) -> dict:
         names.add(checked["name"])
         normalized.append(dict(checked))
     config["layouts"] = normalized
+
+    mirrors = config.get("updateGraphMirrors", [])
+    if not isinstance(mirrors, list) or any(
+        not isinstance(item, str) or not item.strip() for item in mirrors
+    ):
+        raise ReleaseError("config updateGraphMirrors must be a string array")
+    if len(set(mirrors)) != len(mirrors):
+        raise ReleaseError("config updateGraphMirrors must not contain duplicates")
+    config["updateGraphMirrors"] = list(mirrors)
     return config
 
 
@@ -145,6 +154,11 @@ def paths(repo: Path, config: dict) -> tuple[Path, Path, Path]:
         repo / layout["lockPath"],
         repo / layout["updateGraphPath"],
     )
+
+
+def graph_mirror_paths(repo: Path, config: dict) -> list[Path]:
+    """Configured compatibility mirrors canonical update graph."""
+    return [repo / value for value in config.get("updateGraphMirrors", [])]
 
 
 def manifest_release(path: Path) -> str:
@@ -228,12 +242,26 @@ def state(repo: Path, config: dict) -> tuple[str, dict, dict]:
     graph = read_json(graph_path)
     validate_graph(graph)
 
+    mirror_errors = []
+    for mirror_path in graph_mirror_paths(repo, config):
+        if mirror_path.resolve() == graph_path.resolve():
+            continue
+        try:
+            mirror = read_json(mirror_path)
+        except ReleaseError as exc:
+            mirror_errors.append(str(exc))
+            continue
+        if mirror != graph:
+            mirror_errors.append(
+                f"update graph mirror {mirror_path} differs from canonical {graph_path}"
+            )
+
     lock_release = lock.get("release")
     lock_ref = lock.get("source", {}).get("ref") if isinstance(lock.get("source"), dict) else None
     graph_latest = graph.get("latest")
     expected_plain = manifest.removeprefix("v")
 
-    errors = []
+    errors = list(mirror_errors)
     if lock_release != expected_plain:
         errors.append(f"lock.release={lock_release!r}, expected {expected_plain!r}")
     if lock_ref != manifest:
@@ -280,20 +308,36 @@ def command_prepare(args: argparse.Namespace) -> None:
     source["ref"] = target
     write_json(lock_path, lock)
 
+    transition_kind = getattr(args, "transition_kind", "standard")
+    transition_reason = (getattr(args, "transition_reason", None) or "").strip()
+    if transition_kind not in {"standard", "bridge"}:
+        raise ReleaseError("transition kind must be standard or bridge")
+    if transition_kind == "bridge" and not transition_reason:
+        raise ReleaseError("bridge transition requires non-empty reason")
+    if transition_kind == "standard" and transition_reason:
+        raise ReleaseError("standard transition must not define bridge reason")
+
     graph["latest"] = target
-    # reloadRequired — осознанное свойство перехода между релизами.
-    # Helper не пытается угадывать его по diff: maintainer задаёт флаг явно
+    # reloadRequired и kind — осознанные свойства перехода между релизами.
+    # Helper не пытается угадывать их по diff: maintainer задаёт значения явно
     # при Prepare Harness Release.
-    graph["transitions"].append(
-        {
-            "from": current,
-            "to": target,
-            "kind": "standard",
-            "reloadRequired": bool(args.reload_required),
-        }
-    )
+    edge = {
+        "from": current,
+        "to": target,
+        "kind": transition_kind,
+        "reloadRequired": bool(args.reload_required),
+    }
+    if transition_kind == "bridge":
+        edge["reason"] = transition_reason
+    graph["transitions"].append(edge)
     validate_graph(graph)
     write_json(graph_path, graph)
+    for mirror_path in graph_mirror_paths(args.repo_dir, config):
+        if mirror_path.resolve() == graph_path.resolve():
+            continue
+        if not mirror_path.is_file():
+            raise ReleaseError(f"missing update graph mirror: {mirror_path}")
+        write_json(mirror_path, graph)
 
     resulting, _, _ = state(args.repo_dir, config)
     if resulting != target:
@@ -331,6 +375,16 @@ def parser() -> argparse.ArgumentParser:
                 "--reload-required",
                 action="store_true",
                 help="Пометить новый release transition как требующий reload updater/runtime.",
+            )
+            cmd.add_argument(
+                "--transition-kind",
+                choices=["standard", "bridge"],
+                default="standard",
+                help="Тип нового перехода update graph.",
+            )
+            cmd.add_argument(
+                "--transition-reason",
+                help="Обязательная причина для bridge transition.",
             )
         cmd.set_defaults(handler=handler)
     return root

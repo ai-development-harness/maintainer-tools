@@ -12,6 +12,19 @@ on:
         required: true
         default: false
         type: boolean
+      transition_kind:
+        description: "Тип перехода update graph"
+        required: true
+        default: standard
+        type: choice
+        options:
+          - standard
+          - bridge
+      transition_reason:
+        description: "Причина bridge transition; для standard оставить пустым"
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -131,12 +144,17 @@ jobs:
         env:
           VERSION: ${{ inputs.version }}
           RELOAD_REQUIRED: ${{ inputs.reload_required }}
+          TRANSITION_KIND: ${{ inputs.transition_kind }}
+          TRANSITION_REASON: ${{ inputs.transition_reason }}
         run: |
           set -euo pipefail
 
-          EXTRA_ARGS=()
+          EXTRA_ARGS=(--transition-kind "$TRANSITION_KIND")
           if [[ "$RELOAD_REQUIRED" == "true" ]]; then
             EXTRA_ARGS+=(--reload-required)
+          fi
+          if [[ -n "$TRANSITION_REASON" ]]; then
+            EXTRA_ARGS+=(--transition-reason "$TRANSITION_REASON")
           fi
 
           python scripts/release.py \

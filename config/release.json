@@ -17,5 +17,8 @@
       "updateGraphPath": ".project/harness-update-graph.json",
       "validatorPath": "tools/harness/validate.py"
     }
+  ],
+  "updateGraphMirrors": [
+    ".project/harness-update-graph.json"
   ]
 }
