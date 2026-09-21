@@ -178,6 +178,75 @@ class ReleaseHelperTest(unittest.TestCase):
             {"from": "v0.2.4", "to": "v0.2.5", "kind": "standard", "reloadRequired": False},
         )
 
+    def test_prepare_bridge_requires_reason_and_preserves_reason(self) -> None:
+        args = type(
+            "Args",
+            (),
+            {
+                "config": self.config_path,
+                "repo_dir": self.root,
+                "version": "v0.2.5",
+                "reload_required": True,
+                "transition_kind": "bridge",
+                "transition_reason": "runtime bootstrap changed",
+            },
+        )()
+        release.command_prepare(args)
+
+        _, _, graph = release.state(self.root, self.config)
+        self.assertEqual(
+            graph["transitions"][-1],
+            {
+                "from": "v0.2.4",
+                "to": "v0.2.5",
+                "kind": "bridge",
+                "reloadRequired": True,
+                "reason": "runtime bootstrap changed",
+            },
+        )
+
+    def test_prepare_rejects_bridge_without_reason(self) -> None:
+        args = type(
+            "Args",
+            (),
+            {
+                "config": self.config_path,
+                "repo_dir": self.root,
+                "version": "v0.2.5",
+                "reload_required": True,
+                "transition_kind": "bridge",
+                "transition_reason": "",
+            },
+        )()
+        with self.assertRaisesRegex(release.ReleaseError, "requires non-empty reason"):
+            release.command_prepare(args)
+
+    def test_prepare_synchronizes_update_graph_mirror(self) -> None:
+        data = json.loads(self.config_path.read_text(encoding="utf-8"))
+        data["updateGraphMirrors"] = ["compat/harness-update-graph.json"]
+        self.config_path.write_text(json.dumps(data), encoding="utf-8")
+        mirror = self.root / "compat" / "harness-update-graph.json"
+        mirror.parent.mkdir(parents=True, exist_ok=True)
+        canonical = self.root / ".project" / "harness-update-graph.json"
+        mirror.write_text(canonical.read_text(encoding="utf-8"), encoding="utf-8")
+
+        args = type(
+            "Args",
+            (),
+            {
+                "config": self.config_path,
+                "repo_dir": self.root,
+                "version": "v0.2.5",
+                "reload_required": False,
+            },
+        )()
+        release.command_prepare(args)
+
+        self.assertEqual(
+            json.loads(mirror.read_text(encoding="utf-8")),
+            json.loads(canonical.read_text(encoding="utf-8")),
+        )
+
     def test_prepare_can_require_reload(self) -> None:
         args = type(
             "Args",
