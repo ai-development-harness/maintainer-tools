@@ -306,6 +306,11 @@ def command_prepare(args: argparse.Namespace) -> None:
     if not isinstance(source, dict):
         raise ReleaseError("lock.source must be an object")
     source["ref"] = target
+    # Release snapshot не может содержать self-pin на собственный commit:
+    # SHA release commit появляется только после commit/merge/tag. Точный
+    # source.commit записывается уже в project lock самим updater/adoption,
+    # когда immutable tag существует и его OID можно доказать.
+    source.pop("commit", None)
     write_json(lock_path, lock)
 
     transition_kind = getattr(args, "transition_kind", "standard")
@@ -347,9 +352,17 @@ def command_prepare(args: argparse.Namespace) -> None:
 
 def command_verify(args: argparse.Namespace) -> None:
     config = load_config(args.config)
-    current, _, graph = state(args.repo_dir, config)
+    current, lock, graph = state(args.repo_dir, config)
     if current != args.version:
         raise ReleaseError(f"metadata points to {current}, expected {args.version}")
+    source = lock.get("source")
+    if not isinstance(source, dict):
+        raise ReleaseError("lock.source must be an object")
+    if "commit" in source:
+        raise ReleaseError(
+            "release snapshot lock must not contain source.commit; "
+            "self commit OID does not exist until the release commit is created"
+        )
     incoming = [edge for edge in graph["transitions"] if edge.get("to") == args.version]
     if not incoming:
         raise ReleaseError(f"release {args.version} has no incoming update transition")
