@@ -34,13 +34,15 @@
    - новый layout: `.harness/manifest.yaml`, `.harness/harness.lock.json`, `.harness/harness-update-graph.json`;
    - legacy layout: `.project/manifest.yaml`, `.project/harness.lock.json`, `.project/harness-update-graph.json`;
    - manifest → `harness.release`;
-   - lock → `release/source.ref`;
+   - lock → `release/source.ref`, при этом `source.commit` удаляется из release snapshot;
    - update graph → `latest` и transition `current → target` с явно заданным `reloadRequired`;
 4. запускает validator из того же resolved layout;
 5. создаёт `release/vX.Y.Z`;
 6. открывает PR `chore: подготовить release vX.Y.Z`.
 
 Tag и GitHub Release здесь **не создаются**.
+
+Важно: release snapshot намеренно **не содержит** `lock.source.commit`. SHA самого release commit невозможно знать до создания этого commit, поэтому self-pin в snapshot был бы либо устаревшим, либо вымышленным. После установки/обновления проекта deterministic updater уже разрешает immutable tag и записывает его точный OID в project lock.
 
 ### Publish Harness Release
 
