@@ -178,6 +178,61 @@ class ReleaseHelperTest(unittest.TestCase):
             {"from": "v0.2.4", "to": "v0.2.5", "kind": "standard", "reloadRequired": False},
         )
 
+    def test_prepare_removes_source_commit_from_release_snapshot(self) -> None:
+        lock_path = self.root / ".project" / "harness.lock.json"
+        lock = json.loads(lock_path.read_text(encoding="utf-8"))
+        lock["source"]["commit"] = "deadbeef"
+        lock_path.write_text(json.dumps(lock, indent=2) + "\n", encoding="utf-8")
+
+        args = type(
+            "Args",
+            (),
+            {
+                "config": self.config_path,
+                "repo_dir": self.root,
+                "version": "v0.2.5",
+                "reload_required": False,
+            },
+        )()
+        release.command_prepare(args)
+
+        prepared = json.loads(lock_path.read_text(encoding="utf-8"))
+        self.assertEqual(prepared["source"]["ref"], "v0.2.5")
+        self.assertNotIn("commit", prepared["source"])
+
+    def test_verify_rejects_self_commit_pin_in_release_snapshot(self) -> None:
+        args = type(
+            "Args",
+            (),
+            {
+                "config": self.config_path,
+                "repo_dir": self.root,
+                "version": "v0.2.5",
+                "reload_required": False,
+            },
+        )()
+        release.command_prepare(args)
+
+        lock_path = self.root / ".project" / "harness.lock.json"
+        lock = json.loads(lock_path.read_text(encoding="utf-8"))
+        lock["source"]["commit"] = "deadbeef"
+        lock_path.write_text(json.dumps(lock, indent=2) + "\n", encoding="utf-8")
+
+        verify_args = type(
+            "Args",
+            (),
+            {
+                "config": self.config_path,
+                "repo_dir": self.root,
+                "version": "v0.2.5",
+            },
+        )()
+        with self.assertRaisesRegex(
+            release.ReleaseError,
+            "release snapshot lock must not contain source.commit",
+        ):
+            release.command_verify(verify_args)
+
     def test_prepare_bridge_requires_reason_and_preserves_reason(self) -> None:
         args = type(
             "Args",
