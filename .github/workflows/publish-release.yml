@@ -23,6 +23,33 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     steps:
+      # Пробелы из формы workflow_dispatch ломают имена ветки/PR/tag: нормализуем
+      # inputs один раз и дальше используем только outputs этого шага.
+      - name: Normalize inputs
+        id: normalize
+        shell: bash
+        env:
+          RAW_VERSION: ${{ inputs.version }}
+          RAW_TITLE: ${{ inputs.title }}
+        run: |
+          set -euo pipefail
+          VERSION="$(printf '%s' "$RAW_VERSION" | tr -d '[:space:]')"
+          if ! [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Version must look like v1.2.3, got: '$RAW_VERSION'" >&2
+            exit 1
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          TITLE="$(printf '%s' "$RAW_TITLE" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+          if [ -z "$TITLE" ]; then
+            echo "Release title must not be empty." >&2
+            exit 1
+          fi
+          {
+            echo "title<<__HARNESS_TITLE__"
+            printf '%s\n' "$TITLE"
+            echo "__HARNESS_TITLE__"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Checkout maintainer tools
         uses: actions/checkout@v7
 
@@ -74,7 +101,7 @@ jobs:
         id: release-pr
         shell: bash
         env:
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ steps.normalize.outputs.version }}
           TARGET_REPOSITORY: ${{ steps.config.outputs.target_repository }}
           DEFAULT_BRANCH: ${{ steps.config.outputs.default_branch }}
           BRANCH_PREFIX: ${{ steps.config.outputs.branch_prefix }}
@@ -156,7 +183,7 @@ jobs:
 
       - name: Verify release metadata
         env:
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ steps.normalize.outputs.version }}
         run: |
           python scripts/release.py \
             --config config/release.json \
@@ -171,7 +198,7 @@ jobs:
       - name: Create or verify release tag
         shell: bash
         env:
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ steps.normalize.outputs.version }}
           MERGE_SHA: ${{ steps.release-pr.outputs.merge_sha }}
         run: |
           set -euo pipefail
@@ -191,8 +218,8 @@ jobs:
       - name: Create or verify GitHub Release
         shell: bash
         env:
-          VERSION: ${{ inputs.version }}
-          TITLE: ${{ inputs.title }}
+          VERSION: ${{ steps.normalize.outputs.version }}
+          TITLE: ${{ steps.normalize.outputs.title }}
           TARGET_REPOSITORY: ${{ steps.config.outputs.target_repository }}
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |

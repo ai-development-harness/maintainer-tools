@@ -37,6 +37,22 @@ jobs:
   prepare:
     runs-on: ubuntu-latest
     steps:
+      # Пробелы из формы workflow_dispatch ломают имена ветки/PR/tag: нормализуем
+      # inputs один раз и дальше используем только outputs этого шага.
+      - name: Normalize inputs
+        id: normalize
+        shell: bash
+        env:
+          RAW_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          VERSION="$(printf '%s' "$RAW_VERSION" | tr -d '[:space:]')"
+          if ! [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Version must look like v1.2.3, got: '$RAW_VERSION'" >&2
+            exit 1
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
       - name: Checkout maintainer tools
         uses: actions/checkout@v7
 
@@ -111,7 +127,7 @@ jobs:
         id: preflight
         shell: bash
         env:
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ steps.normalize.outputs.version }}
           TARGET_REPOSITORY: ${{ steps.config.outputs.target_repository }}
           DEFAULT_BRANCH: ${{ steps.config.outputs.default_branch }}
           BRANCH_PREFIX: ${{ steps.config.outputs.branch_prefix }}
@@ -142,7 +158,7 @@ jobs:
 
       - name: Prepare metadata
         env:
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ steps.normalize.outputs.version }}
           RELOAD_REQUIRED: ${{ inputs.reload_required }}
           TRANSITION_KIND: ${{ inputs.transition_kind }}
           TRANSITION_REASON: ${{ inputs.transition_reason }}
@@ -166,7 +182,7 @@ jobs:
 
       - name: Verify prepared metadata
         env:
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ steps.normalize.outputs.version }}
         run: |
           python scripts/release.py \
             --config config/release.json \
@@ -181,7 +197,7 @@ jobs:
       - name: Commit and push release branch
         shell: bash
         env:
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ steps.normalize.outputs.version }}
           BRANCH: ${{ steps.preflight.outputs.branch }}
           APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
@@ -209,7 +225,7 @@ jobs:
       - name: Create release pull request
         shell: bash
         env:
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ steps.normalize.outputs.version }}
           CURRENT: ${{ steps.preflight.outputs.current }}
           BRANCH: ${{ steps.preflight.outputs.branch }}
           LAYOUT: ${{ steps.layout.outputs.name }}
