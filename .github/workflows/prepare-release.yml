@@ -300,7 +300,7 @@ jobs:
           - Harness Integrity validator пройден до создания PR;
           - tag/release **не создаются** этим workflow.
 
-          После review и squash merge этого PR запусти workflow **Publish Harness Release** с тем же version.
+          После review и squash merge этого PR запусти workflow **Publish Harness Release** с теми же version и Harness branch.
           EOF
 
           gh pr create \
