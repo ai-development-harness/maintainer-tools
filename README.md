@@ -7,7 +7,8 @@
 Обычный merge PR в `main` **не выпускает релиз**. Релиз состоит из двух ручных workflow:
 
 ```text
-обычные PR → main
+изменения → выбранная ветка Harness
+             (main / maintenance / release line)
               │
               ▼
       Prepare Harness Release
@@ -28,17 +29,19 @@
 
 `.github/workflows/prepare-release.yml`:
 
-1. проверяет, что текущие `manifest / lock / update graph` согласованы;
-2. проверяет отсутствие target tag, Release и release branch;
-3. через `scripts/release.py` детерминированно определяет единственный полный release layout и обновляет его:
+1. требует явно указать source branch Harness; default branch намеренно отсутствует;
+2. проверяет, что выбранная ветка существует, checkout совпадает с её remote HEAD и текущие `manifest / lock / update graph` согласованы;
+3. проверяет отсутствие target tag, Release и release branch;
+4. через `scripts/release.py` детерминированно определяет единственный полный release layout и обновляет его:
    - новый layout: `.harness/manifest.yaml`, `.harness/harness.lock.json`, `.harness/harness-update-graph.json`;
    - legacy layout: `.project/manifest.yaml`, `.project/harness.lock.json`, `.project/harness-update-graph.json`;
    - manifest → `harness.release`;
    - lock → `release/source.ref`, при этом `source.commit` удаляется из release snapshot;
    - update graph → `latest` и transition `current → target` с явно заданным `reloadRequired`;
-4. запускает validator из того же resolved layout;
-5. создаёт `release/vX.Y.Z`;
-6. открывает PR `chore: подготовить release vX.Y.Z`.
+5. запускает validator из того же resolved layout;
+6. повторно проверяет, что source branch не сдвинулась во время подготовки;
+7. создаёт `release/vX.Y.Z`;
+8. открывает PR `chore: подготовить release vX.Y.Z` **в выбранную source branch**.
 
 Tag и GitHub Release здесь **не создаются**.
 
@@ -48,7 +51,7 @@ Tag и GitHub Release здесь **не создаются**.
 
 `.github/workflows/publish-release.yml` запускается после merge release PR.
 
-Он находит именно merged PR `release/vX.Y.Z`, берёт его merge commit, повторно проверяет metadata/validator и только затем создаёт lightweight tag и GitHub Release.
+Он требует снова явно указать Harness branch, находит именно merged PR `release/vX.Y.Z` с этой base branch, проверяет, что merge commit всё ещё достижим из выбранной ветки, повторно проверяет metadata/validator и только затем создаёт lightweight tag и GitHub Release.
 
 Tag привязывается **не к текущему `main HEAD`**, а к merge commit release PR. Поэтому PR, случайно влитый после подготовки релиза, не попадёт в уже подготовленный release.
 
@@ -61,6 +64,8 @@ Target repository и допустимые release layouts находятся в:
 ```text
 config/release.json
 ```
+
+Source branch **не хранится в config вообще** и не имеет default. Её нужно явно вводить при каждом Prepare и Publish. Это сделано намеренно: release tooling не должен молча выпускать из `main`.
 
 Helper не выбирает layout по версии Harness и не использует fallback «наиболее похожего» каталога. Релиз разрешён только если в target repository найден **ровно один полный layout** (manifest + lock + update graph + validator). Если одновременно присутствуют оба layout или ни один не полон, операция блокируется.
 
@@ -180,6 +185,7 @@ Workflow получает короткоживущий installation token чер
 
 ```text
 version:           v0.2.7
+harness_branch:    main
 reload_required:   false
 transition_kind:   standard
 transition_reason:
@@ -232,15 +238,19 @@ transition_reason: <почему старый runtime не может безоп
 и нажми **Run workflow**:
 
 ```text
-version: v0.2.7
-title:   v0.2.7 — Release title
+version:        v0.2.7
+harness_branch: main
+title:          v0.2.7 — Release title
 ```
 
-Workflow найдёт merge commit release PR и только после повторной проверки создаст tag + Release.
+Workflow найдёт merge commit release PR именно в указанной `harness_branch` и только после повторной проверки создаст tag + Release. Для Publish указывай **ту же ветку**, которая использовалась при Prepare.
 
 ## Failure policy
 
-- Нет merged release PR → publish блокируется.
+- Harness branch не указана, невалидна или не существует → workflow блокируется; fallback на `main` отсутствует.
+- Source branch сдвинулась во время Prepare → workflow блокируется до push release branch.
+- Нет merged release PR в выбранной Harness branch → publish блокируется.
+- Merge commit release PR больше не достижим из выбранной Harness branch → publish блокируется.
 - Metadata не соответствует requested version → publish блокируется до создания tag.
 - Tag существует на другом commit → tag не перемещается.
 - Release branch/tag/release уже существует при Prepare → overwrite не выполняется.
