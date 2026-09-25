@@ -62,7 +62,6 @@ def load_config(path: Path) -> dict:
     config = read_json(path)
     required = {
         "targetRepository",
-        "defaultBranch",
         "releaseBranchPrefix",
     }
     missing = sorted(required - config.keys())
