@@ -4,7 +4,7 @@
 
 ## Release flow
 
-Обычный merge PR в `main` **не выпускает релиз**. Релиз состоит из двух ручных workflow:
+Обычный merge PR в любую Harness-ветку **не выпускает релиз**. Релиз состоит из двух ручных workflow:
 
 ```text
 изменения → выбранная ветка Harness
@@ -53,7 +53,7 @@ Tag и GitHub Release здесь **не создаются**.
 
 Он требует снова явно указать Harness branch, находит именно merged PR `release/vX.Y.Z` с этой base branch, проверяет, что merge commit всё ещё достижим из выбранной ветки, повторно проверяет metadata/validator и только затем создаёт lightweight tag и GitHub Release.
 
-Tag привязывается **не к текущему `main HEAD`**, а к merge commit release PR. Поэтому PR, случайно влитый после подготовки релиза, не попадёт в уже подготовленный release.
+Tag привязывается **не к текущему HEAD выбранной Harness-ветки**, а к merge commit release PR. Поэтому изменения, случайно влитые после подготовки релиза, не попадут в уже подготовленный release.
 
 Publish идемпотентен для частичного сбоя: существующий tag допустим только если уже указывает на ожидаемый commit; существующий Release допустим только с ожидаемым названием.
 
@@ -274,6 +274,7 @@ python -m py_compile scripts/release.py
 config/release.json
 scripts/release.py
 tests/test_release.py
+tests/test_workflows.py
 ```
 
 ## Главное правило
