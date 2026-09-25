@@ -13,7 +13,7 @@ CONFIG = ROOT / "config" / "release.json"
 
 def input_block(text: str, name: str) -> str:
     match = re.search(
-        rf"(?ms)^      {re.escape(name)}:\\n(?P<body>(?:^        .*(?:\\n|$))+)",
+        rf"(?ms)^      {re.escape(name)}:\n(?P<body>(?:^        .*(?:\n|$))+)",
         text,
     )
     if not match:
