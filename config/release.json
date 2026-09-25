@@ -1,6 +1,5 @@
 {
   "targetRepository": "ai-development-harness/ai-development-harness-template",
-  "defaultBranch": "main",
   "releaseBranchPrefix": "release/",
   "layouts": [
     {

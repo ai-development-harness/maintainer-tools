@@ -7,6 +7,10 @@ on:
         description: "Release tag, например v0.2.7"
         required: true
         type: string
+      harness_branch:
+        description: "Ветка Harness, в которую был влит release PR, например main или maint/0.1.x"
+        required: true
+        type: string
       title:
         description: "Название GitHub Release"
         required: true
@@ -30,6 +34,7 @@ jobs:
         shell: bash
         env:
           RAW_VERSION: ${{ inputs.version }}
+          RAW_HARNESS_BRANCH: ${{ inputs.harness_branch }}
           RAW_TITLE: ${{ inputs.title }}
         run: |
           set -euo pipefail
@@ -38,7 +43,23 @@ jobs:
             echo "Version must look like v1.2.3, got: '$RAW_VERSION'" >&2
             exit 1
           fi
+
+          HARNESS_BRANCH="$(printf '%s' "$RAW_HARNESS_BRANCH" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+          if [[ -z "$HARNESS_BRANCH" ]]; then
+            echo "Harness branch must be specified explicitly; there is no default branch." >&2
+            exit 1
+          fi
+          if [[ "$HARNESS_BRANCH" == refs/* ]]; then
+            echo "Use a short Harness branch name, not a refs/* name: '$HARNESS_BRANCH'" >&2
+            exit 1
+          fi
+          if ! git check-ref-format --branch "$HARNESS_BRANCH" >/dev/null 2>&1; then
+            echo "Invalid Harness branch name: '$HARNESS_BRANCH'" >&2
+            exit 1
+          fi
+
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "harness_branch=${HARNESS_BRANCH}" >> "$GITHUB_OUTPUT"
           TITLE="$(printf '%s' "$RAW_TITLE" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
           if [ -z "$TITLE" ]; then
             echo "Release title must not be empty." >&2
@@ -73,7 +94,6 @@ jobs:
               print(f"target_repository={config['targetRepository']}", file=out)
               print(f"owner={owner}", file=out)
               print(f"repository_name={name}", file=out)
-              print(f"default_branch={config['defaultBranch']}", file=out)
               print(f"branch_prefix={config['releaseBranchPrefix']}", file=out)
           PY
 
@@ -92,10 +112,32 @@ jobs:
         uses: actions/checkout@v7
         with:
           repository: ${{ steps.config.outputs.target_repository }}
-          ref: ${{ steps.config.outputs.default_branch }}
+          ref: ${{ steps.normalize.outputs.harness_branch }}
           token: ${{ steps.app-token.outputs.token }}
           path: target
           fetch-depth: 0
+
+      - name: Verify Harness source branch
+        id: source
+        shell: bash
+        env:
+          HARNESS_BRANCH: ${{ steps.normalize.outputs.harness_branch }}
+        run: |
+          set -euo pipefail
+
+          REMOTE_SHA="$(git -C target ls-remote --exit-code --heads origin "refs/heads/${HARNESS_BRANCH}" | awk 'NR == 1 {print $1}')"
+          if [[ -z "$REMOTE_SHA" ]]; then
+            echo "Harness branch '$HARNESS_BRANCH' does not exist in target repository." >&2
+            exit 1
+          fi
+
+          LOCAL_SHA="$(git -C target rev-parse HEAD)"
+          if [[ "$LOCAL_SHA" != "$REMOTE_SHA" ]]; then
+            echo "Checked out ${LOCAL_SHA}, but origin/${HARNESS_BRANCH} is ${REMOTE_SHA}." >&2
+            exit 1
+          fi
+
+          echo "source_sha=${REMOTE_SHA}" >> "$GITHUB_OUTPUT"
 
       - name: Resolve release PR
         id: release-pr
@@ -103,7 +145,7 @@ jobs:
         env:
           VERSION: ${{ steps.normalize.outputs.version }}
           TARGET_REPOSITORY: ${{ steps.config.outputs.target_repository }}
-          DEFAULT_BRANCH: ${{ steps.config.outputs.default_branch }}
+          HARNESS_BRANCH: ${{ steps.normalize.outputs.harness_branch }}
           BRANCH_PREFIX: ${{ steps.config.outputs.branch_prefix }}
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
@@ -115,7 +157,7 @@ jobs:
           PR_JSON="$(gh pr list \
             --repo "$TARGET_REPOSITORY" \
             --state all \
-            --base "$DEFAULT_BRANCH" \
+            --base "$HARNESS_BRANCH" \
             --head "$BRANCH" \
             --limit 10 \
             --json number,title,url,state,mergeCommit,mergedAt)"
@@ -149,6 +191,13 @@ jobs:
           print(merge_sha)
           PY
           )"
+
+          git -C target fetch --no-tags origin "+refs/heads/${HARNESS_BRANCH}:refs/remotes/origin/${HARNESS_BRANCH}"
+          if ! git -C target merge-base --is-ancestor "$MERGE_SHA" "refs/remotes/origin/${HARNESS_BRANCH}"; then
+            echo "Release PR merge commit ${MERGE_SHA} is not reachable from Harness branch '${HARNESS_BRANCH}'." >&2
+            echo "Refusing to publish a release whose selected source branch no longer contains the prepared release." >&2
+            exit 1
+          fi
 
           echo "branch=${BRANCH}" >> "$GITHUB_OUTPUT"
           echo "merge_sha=${MERGE_SHA}" >> "$GITHUB_OUTPUT"
