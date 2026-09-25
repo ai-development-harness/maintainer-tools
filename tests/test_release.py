@@ -22,7 +22,6 @@ class ReleaseHelperTest(unittest.TestCase):
             json.dumps(
                 {
                     "targetRepository": "example/harness",
-                    "defaultBranch": "main",
                     "releaseBranchPrefix": "release/",
                     "layouts": [
                         {
