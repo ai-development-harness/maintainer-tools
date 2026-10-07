@@ -62,7 +62,24 @@ class ReleaseWorkflowTest(unittest.TestCase):
             'merge-base --is-ancestor "$MERGE_SHA" "refs/remotes/origin/${HARNESS_BRANCH}"',
             self.publish,
         )
-        self.assertIn('git -C target checkout --detach "$MERGE_SHA"', self.publish)
+        self.assertIn("ref: ${{ needs.resolve.outputs.merge_sha }}", self.publish)
+
+    def test_publish_requalifies_exact_merge_sha_before_tag(self) -> None:
+        self.assertIn("name: Qualify exact release merge SHA", self.publish)
+        self.assertIn("uses: ./.github/workflows/release-qualification.yml", self.publish)
+        self.assertIn("target_sha: ${{ needs.resolve.outputs.merge_sha }}", self.publish)
+        self.assertIn("needs:\n      - resolve\n      - qualify", self.publish)
+        self.assertLess(
+            self.publish.index("Verify exact-SHA qualification and Harness Integrity checks"),
+            self.publish.index("Create or verify release tag"),
+        )
+
+    def test_publish_requires_exact_sha_check_runs(self) -> None:
+        self.assertIn("permission-checks: read", self.publish)
+        self.assertIn("scripts/release_gates.py", self.publish)
+        self.assertIn("check-runs?per_page=100", self.publish)
+        self.assertIn("QUALIFICATION_APP_SLUG", self.publish)
+        self.assertIn("MERGE_SHA: ${{ needs.resolve.outputs.merge_sha }}", self.publish)
 
     def test_qualification_is_reusable_and_manual(self) -> None:
         self.assertIn("workflow_call:", self.qualification)
