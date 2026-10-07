@@ -4,7 +4,7 @@
 
 ## Release flow
 
-Обычный merge PR в любую Harness-ветку **не выпускает релиз**. Релиз состоит из двух ручных workflow:
+Обычный merge PR в любую Harness-ветку **не выпускает релиз**. Релиз использует два ручных workflow и отдельную автоматическую Release Qualification между подготовкой candidate и публикацией:
 
 ```text
 изменения → выбранная ветка Harness
@@ -16,7 +16,11 @@
               ▼
        release/vX.Y.Z + PR
               │
-        review / squash merge
+              ▼
+ Harness Release Qualification
+       exact candidate SHA
+              │
+       review / squash merge
               │
               ▼
       Publish Harness Release
@@ -41,11 +45,36 @@
 5. запускает validator из того же resolved layout;
 6. повторно проверяет, что source branch не сдвинулась во время подготовки;
 7. создаёт `release/vX.Y.Z`;
-8. открывает PR `chore: подготовить release vX.Y.Z` **в выбранную source branch**.
+8. открывает PR `chore: подготовить release vX.Y.Z` **в выбранную source branch**;
+9. экспортирует exact candidate SHA и автоматически вызывает reusable `Harness Release Qualification` для этого commit.
 
-Tag и GitHub Release здесь **не создаются**.
+Tag и GitHub Release здесь **не создаются**. Qualification также не создаёт tag/release и не изменяет release metadata.
 
 Важно: release snapshot намеренно **не содержит** `lock.source.commit`. SHA самого release commit невозможно знать до создания этого commit, поэтому self-pin в snapshot был бы либо устаревшим, либо вымышленным. После установки/обновления проекта deterministic updater уже разрешает immutable tag и записывает его точный OID в project lock.
+
+### Harness Release Qualification
+
+`.github/workflows/release-qualification.yml` — reusable + manually dispatchable workflow для release-level проверки **exact Harness SHA**.
+
+Он:
+
+1. валидирует `target_repository / target_ref / target_sha` и доказывает, что exact SHA достижим из выбранной Harness branch;
+2. создаёт в Harness repository отдельный GitHub Check с устойчивым именем `Harness Release Qualification`, привязанный именно к `target_sha`;
+3. создаёт scoped App token только для target Harness repository;
+4. читает public `release-canary` без App credentials, разрешает exact SHA accepted canary `main` и использует его как immutable baseline конкретного run;
+5. запускает canonical core lanes:
+   - current Linux / Python 3.13;
+   - minimum Linux / Python 3.11;
+   - Windows / Python 3.13;
+6. запускает canonical initialized downstream upgrade runner на disposable canary baseline;
+7. сохраняет machine-readable evidence каждого lane как Actions artifact;
+8. через `always()` finalizer завершает exact-SHA Check как success только если **все** обязательные jobs завершились success.
+
+Workflow не копирует stress logic: bounded stress является частью canonical `release-qualification.py --lane current` в Harness core.
+
+Если public canary недоступен, target SHA/ref не совпадают, lane падает, evidence incomplete или finalizer не может обновить Check — qualification не считается успешной.
+
+Prepare автоматически вызывает этот workflow для prepared candidate SHA. Повторная qualification exact merge SHA перед Publish подключается отдельным publish hard gate и не подменяется candidate PASS.
 
 ### Publish Harness Release
 
@@ -106,6 +135,7 @@ Repository permissions:
 |---|---|
 | Contents | Read & write |
 | Pull requests | Read & write |
+| Checks | Read & write |
 | Metadata | Read-only |
 
 Webhook не требуется.
@@ -115,6 +145,8 @@ Webhook не требуется.
 ```text
 ai-development-harness-template
 ```
+
+`release-canary` публичный и qualification читает его без App credentials. Добавлять canary в installation GitHub App не требуется.
 
 Инструкция GitHub:
 
@@ -157,7 +189,7 @@ Client ID находится на странице настроек создан
 HARNESS_RELEASE_APP_CLIENT_ID
 ```
 
-Workflow получает короткоживущий installation token через `actions/create-github-app-token@v3` и дополнительно scope-ит его на target repository.
+Workflow получает короткоживущие installation tokens через `actions/create-github-app-token@v3`. Prepare/Publish scope-ят token под нужные mutating permissions target repository; Release Qualification создаёт target-only token для exact-SHA Check и Harness checkout. Public canary читается без App token.
 
 Подробности официального сценария GitHub App + Actions:
 
@@ -191,7 +223,7 @@ transition_kind:   standard
 transition_reason:
 ```
 
-Появится release PR в `ai-development-harness-template`. Проверь diff и CI.
+Появится release PR в `ai-development-harness-template`. После push candidate автоматически стартует `Harness Release Qualification` для exact candidate SHA. Перед merge проверь diff, обычный Harness Integrity и отдельный qualification Check.
 
 `reload_required` задаёт свойство **нового transition**, а не поведение самого workflow. Release helper намеренно не пытается угадать необходимость reload по diff.
 
@@ -249,6 +281,9 @@ Workflow найдёт merge commit release PR именно в указанной
 
 - Harness branch не указана, невалидна или не существует → workflow блокируется; fallback на `main` отсутствует.
 - Source branch сдвинулась во время Prepare → workflow блокируется до push release branch.
+- Exact candidate SHA не достижим из выбранной release/source branch → Release Qualification блокируется.
+- Public `release-canary` нельзя прочитать или разрешить его exact branch SHA → qualification Check завершается failure.
+- Current/minimum/Windows/downstream gate failed/skipped/incomplete → exact-SHA qualification не может стать success.
 - Нет merged release PR в выбранной Harness branch → publish блокируется.
 - Merge commit release PR больше не достижим из выбранной Harness branch → publish блокируется.
 - Metadata не соответствует requested version → publish блокируется до создания tag.
@@ -270,6 +305,7 @@ python -m py_compile scripts/release.py
 ```text
 .github/workflows/ci.yml
 .github/workflows/prepare-release.yml
+.github/workflows/release-qualification.yml
 .github/workflows/publish-release.yml
 config/release.json
 scripts/release.py
@@ -285,10 +321,14 @@ tests/test_workflows.py
 
 ```text
 Prepare Harness Release
+        ↓
+Harness Release Qualification (exact candidate SHA)
 ```
 
-после review/merge:
+после зелёного candidate qualification и review/merge:
 
 ```text
 Publish Harness Release
 ```
+
+Candidate qualification не является разрешением переиспользовать PASS для другого SHA. Exact release merge SHA должен квалифицироваться отдельно перед окончательной публикацией.

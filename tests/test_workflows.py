@@ -8,6 +8,7 @@ import unittest
 ROOT = Path(__file__).parents[1]
 PREPARE = ROOT / ".github" / "workflows" / "prepare-release.yml"
 PUBLISH = ROOT / ".github" / "workflows" / "publish-release.yml"
+QUALIFICATION = ROOT / ".github" / "workflows" / "release-qualification.yml"
 CONFIG = ROOT / "config" / "release.json"
 
 
@@ -25,6 +26,7 @@ class ReleaseWorkflowTest(unittest.TestCase):
     def setUp(self) -> None:
         self.prepare = PREPARE.read_text(encoding="utf-8")
         self.publish = PUBLISH.read_text(encoding="utf-8")
+        self.qualification = QUALIFICATION.read_text(encoding="utf-8")
         self.config = json.loads(CONFIG.read_text(encoding="utf-8"))
 
     def test_harness_branch_is_required_and_has_no_default(self) -> None:
@@ -61,6 +63,52 @@ class ReleaseWorkflowTest(unittest.TestCase):
             self.publish,
         )
         self.assertIn('git -C target checkout --detach "$MERGE_SHA"', self.publish)
+
+    def test_qualification_is_reusable_and_manual(self) -> None:
+        self.assertIn("workflow_call:", self.qualification)
+        self.assertIn("workflow_dispatch:", self.qualification)
+        for name in ("target_repository", "target_ref", "target_sha"):
+            self.assertGreaterEqual(self.qualification.count(f"{name}:"), 2)
+
+    def test_qualification_binds_explicit_check_to_exact_target_sha(self) -> None:
+        self.assertIn('"name": "Harness Release Qualification"', self.qualification)
+        self.assertIn('"head_sha": os.environ["TARGET_SHA"]', self.qualification)
+        self.assertIn("permission-checks: write", self.qualification)
+        self.assertIn("CHECK_ID: ${{ needs.preflight.outputs.check_id }}", self.qualification)
+        self.assertIn("if: always()", self.qualification)
+
+    def test_qualification_uses_canonical_core_entrypoints(self) -> None:
+        self.assertIn("--lane current", self.qualification)
+        self.assertIn("--lane minimum", self.qualification)
+        self.assertIn("--lane windows", self.qualification)
+        self.assertIn("release-upgrade-qualification.py", self.qualification)
+        self.assertNotIn("run-stress-tests.py", self.qualification)
+
+    def test_public_canary_is_read_without_app_scope(self) -> None:
+        self.assertIn('default: "ai-development-harness/release-canary"', self.qualification)
+        self.assertIn('https://github.com/${CANARY_REPOSITORY}.git', self.qualification)
+        self.assertIn("canary_sha=", self.qualification)
+        self.assertIn("publicly readable canary repository", self.qualification)
+        self.assertNotIn("private-canary", self.qualification)
+        self.assertNotIn("canary_name", self.qualification)
+
+    def test_prepare_exports_and_qualifies_exact_candidate_sha(self) -> None:
+        self.assertIn("candidate_sha: ${{ steps.release-commit.outputs.candidate_sha }}", self.prepare)
+        self.assertIn("id: release-commit", self.prepare)
+        self.assertIn('echo "candidate_sha=$CANDIDATE_SHA" >> "$GITHUB_OUTPUT"', self.prepare)
+        self.assertIn("uses: ./.github/workflows/release-qualification.yml", self.prepare)
+        self.assertIn("target_sha: ${{ needs.prepare.outputs.candidate_sha }}", self.prepare)
+        self.assertIn("target_ref: ${{ needs.prepare.outputs.release_branch }}", self.prepare)
+
+    def test_qualification_is_read_only_for_release_state(self) -> None:
+        forbidden = (
+            "gh release create",
+            "git tag ",
+            "git push origin",
+            "scripts/release.py prepare",
+        )
+        for item in forbidden:
+            self.assertNotIn(item, self.qualification)
 
 
 if __name__ == "__main__":
