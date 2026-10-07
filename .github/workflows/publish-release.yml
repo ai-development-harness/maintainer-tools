@@ -24,8 +24,15 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  publish:
+  resolve:
+    name: Resolve exact release merge SHA
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.normalize.outputs.version }}
+      harness_branch: ${{ steps.normalize.outputs.harness_branch }}
+      title: ${{ steps.normalize.outputs.title }}
+      target_repository: ${{ steps.config.outputs.target_repository }}
+      merge_sha: ${{ steps.release-pr.outputs.merge_sha }}
     steps:
       # Пробелы из формы workflow_dispatch ломают имена ветки/PR/tag: нормализуем
       # inputs один раз и дальше используем только outputs этого шага.
@@ -58,13 +65,14 @@ jobs:
             exit 1
           fi
 
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "harness_branch=${HARNESS_BRANCH}" >> "$GITHUB_OUTPUT"
           TITLE="$(printf '%s' "$RAW_TITLE" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
-          if [ -z "$TITLE" ]; then
+          if [[ -z "$TITLE" ]]; then
             echo "Release title must not be empty." >&2
             exit 1
           fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "harness_branch=$HARNESS_BRANCH" >> "$GITHUB_OUTPUT"
           {
             echo "title<<__HARNESS_TITLE__"
             printf '%s\n' "$TITLE"
@@ -97,7 +105,7 @@ jobs:
               print(f"branch_prefix={config['releaseBranchPrefix']}", file=out)
           PY
 
-      - name: Create scoped GitHub App token
+      - name: Create read-only GitHub App token
         id: app-token
         uses: actions/create-github-app-token@v3
         with:
@@ -105,10 +113,10 @@ jobs:
           private-key: ${{ secrets.HARNESS_RELEASE_APP_PRIVATE_KEY }}
           owner: ${{ steps.config.outputs.owner }}
           repositories: ${{ steps.config.outputs.repository_name }}
-          permission-contents: write
+          permission-contents: read
           permission-pull-requests: read
 
-      - name: Checkout Harness source repository
+      - name: Checkout Harness source branch
         uses: actions/checkout@v7
         with:
           repository: ${{ steps.config.outputs.target_repository }}
@@ -116,9 +124,9 @@ jobs:
           token: ${{ steps.app-token.outputs.token }}
           path: target
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Verify Harness source branch
-        id: source
         shell: bash
         env:
           HARNESS_BRANCH: ${{ steps.normalize.outputs.harness_branch }}
@@ -133,13 +141,11 @@ jobs:
 
           LOCAL_SHA="$(git -C target rev-parse HEAD)"
           if [[ "$LOCAL_SHA" != "$REMOTE_SHA" ]]; then
-            echo "Checked out ${LOCAL_SHA}, but origin/${HARNESS_BRANCH} is ${REMOTE_SHA}." >&2
+            echo "Checked out $LOCAL_SHA, but origin/$HARNESS_BRANCH is $REMOTE_SHA." >&2
             exit 1
           fi
 
-          echo "source_sha=${REMOTE_SHA}" >> "$GITHUB_OUTPUT"
-
-      - name: Resolve release PR
+      - name: Resolve merged release PR
         id: release-pr
         shell: bash
         env:
@@ -192,23 +198,107 @@ jobs:
           PY
           )"
 
-          git -C target fetch --no-tags origin "+refs/heads/${HARNESS_BRANCH}:refs/remotes/origin/${HARNESS_BRANCH}"
-          if ! git -C target merge-base --is-ancestor "$MERGE_SHA" "refs/remotes/origin/${HARNESS_BRANCH}"; then
-            echo "Release PR merge commit ${MERGE_SHA} is not reachable from Harness branch '${HARNESS_BRANCH}'." >&2
-            echo "Refusing to publish a release whose selected source branch no longer contains the prepared release." >&2
+          if ! [[ "$MERGE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Release PR did not resolve to an exact merge commit SHA: '$MERGE_SHA'." >&2
             exit 1
           fi
 
-          echo "branch=${BRANCH}" >> "$GITHUB_OUTPUT"
-          echo "merge_sha=${MERGE_SHA}" >> "$GITHUB_OUTPUT"
+          git -C target fetch --no-tags origin "+refs/heads/${HARNESS_BRANCH}:refs/remotes/origin/${HARNESS_BRANCH}"
+          if ! git -C target merge-base --is-ancestor "$MERGE_SHA" "refs/remotes/origin/${HARNESS_BRANCH}"; then
+            echo "Release PR merge commit $MERGE_SHA is not reachable from Harness branch '$HARNESS_BRANCH'." >&2
+            echo "Refusing to qualify or publish a release whose source branch no longer contains the prepared release." >&2
+            exit 1
+          fi
 
-      - name: Checkout exact release commit
+          echo "merge_sha=$MERGE_SHA" >> "$GITHUB_OUTPUT"
+
+  qualify:
+    name: Qualify exact release merge SHA
+    needs: resolve
+    uses: ./.github/workflows/release-qualification.yml
+    with:
+      target_repository: ${{ needs.resolve.outputs.target_repository }}
+      target_ref: ${{ needs.resolve.outputs.harness_branch }}
+      target_sha: ${{ needs.resolve.outputs.merge_sha }}
+    secrets:
+      HARNESS_RELEASE_APP_PRIVATE_KEY: ${{ secrets.HARNESS_RELEASE_APP_PRIVATE_KEY }}
+
+  publish:
+    name: Publish qualified exact SHA
+    needs:
+      - resolve
+      - qualify
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout maintainer tools
+        uses: actions/checkout@v7
+
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Read release config
+        id: config
         shell: bash
         env:
-          MERGE_SHA: ${{ steps.release-pr.outputs.merge_sha }}
+          EXPECTED_TARGET_REPOSITORY: ${{ needs.resolve.outputs.target_repository }}
         run: |
           set -euo pipefail
-          git -C target checkout --detach "$MERGE_SHA"
+          python - <<'PY'
+          import json
+          import os
+          import sys
+          from pathlib import Path
+
+          config = json.loads(Path("config/release.json").read_text(encoding="utf-8"))
+          target = config["targetRepository"]
+          if target != os.environ["EXPECTED_TARGET_REPOSITORY"]:
+              print(
+                  f"target repository changed inside publish run: {os.environ['EXPECTED_TARGET_REPOSITORY']} -> {target}",
+                  file=sys.stderr,
+              )
+              raise SystemExit(1)
+
+          owner, name = target.split("/", 1)
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              print(f"target_repository={target}", file=out)
+              print(f"owner={owner}", file=out)
+              print(f"repository_name={name}", file=out)
+          PY
+
+      - name: Create publish GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.HARNESS_RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.HARNESS_RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ steps.config.outputs.owner }}
+          repositories: ${{ steps.config.outputs.repository_name }}
+          permission-contents: write
+          permission-pull-requests: read
+          permission-checks: read
+
+      - name: Checkout exact release commit
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ steps.config.outputs.target_repository }}
+          ref: ${{ needs.resolve.outputs.merge_sha }}
+          token: ${{ steps.app-token.outputs.token }}
+          path: target
+          fetch-depth: 0
+
+      - name: Verify exact release checkout
+        shell: bash
+        env:
+          MERGE_SHA: ${{ needs.resolve.outputs.merge_sha }}
+        run: |
+          set -euo pipefail
+          ACTUAL_SHA="$(git -C target rev-parse HEAD)"
+          if [[ "$ACTUAL_SHA" != "$MERGE_SHA" ]]; then
+            echo "Exact release checkout mismatch: expected $MERGE_SHA, got $ACTUAL_SHA." >&2
+            exit 1
+          fi
 
       - name: Resolve Harness release layout
         id: layout
@@ -232,7 +322,7 @@ jobs:
 
       - name: Verify release metadata
         env:
-          VERSION: ${{ steps.normalize.outputs.version }}
+          VERSION: ${{ needs.resolve.outputs.version }}
         run: |
           python scripts/release.py \
             --config config/release.json \
@@ -240,25 +330,45 @@ jobs:
             --repo-dir target \
             --version "$VERSION"
 
-      - name: Run Harness Integrity validator
+      - name: Run local Harness Integrity validator
         working-directory: target
         run: python3 "${{ steps.layout.outputs.validator_path }}" --mode ci
+
+      - name: Verify exact-SHA qualification and Harness Integrity checks
+        shell: bash
+        env:
+          TARGET_REPOSITORY: ${{ steps.config.outputs.target_repository }}
+          MERGE_SHA: ${{ needs.resolve.outputs.merge_sha }}
+          QUALIFICATION_APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+
+          gh api \
+            -H "Accept: application/vnd.github+json" \
+            "repos/$TARGET_REPOSITORY/commits/$MERGE_SHA/check-runs?per_page=100" \
+            > /tmp/release-check-runs.json
+
+          python scripts/release_gates.py \
+            --checks-json /tmp/release-check-runs.json \
+            --sha "$MERGE_SHA" \
+            --qualification-app-slug "$QUALIFICATION_APP_SLUG"
 
       - name: Create or verify release tag
         shell: bash
         env:
-          VERSION: ${{ steps.normalize.outputs.version }}
-          MERGE_SHA: ${{ steps.release-pr.outputs.merge_sha }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+          MERGE_SHA: ${{ needs.resolve.outputs.merge_sha }}
         run: |
           set -euo pipefail
 
           REMOTE_SHA="$(git -C target ls-remote origin "refs/tags/${VERSION}" | awk '{print $1}')"
           if [[ -n "$REMOTE_SHA" ]]; then
             if [[ "$REMOTE_SHA" != "$MERGE_SHA" ]]; then
-              echo "Tag ${VERSION} already exists on ${REMOTE_SHA}, expected ${MERGE_SHA}." >&2
+              echo "Tag $VERSION already exists on $REMOTE_SHA, expected $MERGE_SHA." >&2
               exit 1
             fi
-            echo "Tag ${VERSION} already points to the expected release commit."
+            echo "Tag $VERSION already points to the expected qualified release commit."
           else
             git -C target tag "$VERSION" "$MERGE_SHA"
             git -C target push origin "refs/tags/${VERSION}"
@@ -267,8 +377,8 @@ jobs:
       - name: Create or verify GitHub Release
         shell: bash
         env:
-          VERSION: ${{ steps.normalize.outputs.version }}
-          TITLE: ${{ steps.normalize.outputs.title }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+          TITLE: ${{ needs.resolve.outputs.title }}
           TARGET_REPOSITORY: ${{ steps.config.outputs.target_repository }}
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
@@ -277,10 +387,10 @@ jobs:
           if gh release view "$VERSION" --repo "$TARGET_REPOSITORY" --json name,isDraft,isPrerelease >/tmp/release.json 2>/dev/null; then
             EXISTING_TITLE="$(python -c 'import json; print(json.load(open("/tmp/release.json"))["name"])')"
             if [[ "$EXISTING_TITLE" != "$TITLE" ]]; then
-              echo "Release ${VERSION} already exists with title '${EXISTING_TITLE}', expected '${TITLE}'." >&2
+              echo "Release $VERSION already exists with title '$EXISTING_TITLE', expected '$TITLE'." >&2
               exit 1
             fi
-            echo "Release ${VERSION} already exists with the expected title. Nothing to do."
+            echo "Release $VERSION already exists with the expected title. Nothing to do."
             exit 0
           fi
 

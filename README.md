@@ -23,6 +23,10 @@
        review / squash merge
               │
               ▼
+ Harness Release Qualification
+        exact merge SHA
+              │
+              ▼
       Publish Harness Release
               │
               ▼
@@ -80,7 +84,13 @@ Prepare автоматически вызывает этот workflow для pre
 
 `.github/workflows/publish-release.yml` запускается после merge release PR.
 
-Он требует снова явно указать Harness branch, находит именно merged PR `release/vX.Y.Z` с этой base branch, проверяет, что merge commit всё ещё достижим из выбранной ветки, повторно проверяет metadata/validator и только затем создаёт lightweight tag и GitHub Release.
+Он требует снова явно указать Harness branch, находит именно merged PR `release/vX.Y.Z` с этой base branch и разрешает его exact merge SHA. Затем Publish **сам запускает Release Qualification для exact merge SHA** и не переиспользует candidate PASS. После успешной qualification отдельный hard gate читает Check Runs этого же SHA и требует последние успешные:
+- `Harness Release Qualification` от configured Release Bot App;
+- `Validate Harness` от GitHub Actions;
+- `Validate Python 3.11 compatibility` от GitHub Actions;
+- `Validate Windows boundaries` от GitHub Actions.
+
+Missing, in-progress, failed, созданный другой App или check для другого SHA блокирует tag/Release. Только после этого повторно проверяются metadata/local validator и выполняется публикация.
 
 Tag привязывается **не к текущему HEAD выбранной Harness-ветки**, а к merge commit release PR. Поэтому изменения, случайно влитые после подготовки релиза, не попадут в уже подготовленный release.
 
@@ -286,6 +296,9 @@ Workflow найдёт merge commit release PR именно в указанной
 - Current/minimum/Windows/downstream gate failed/skipped/incomplete → exact-SHA qualification не может стать success.
 - Нет merged release PR в выбранной Harness branch → publish блокируется.
 - Merge commit release PR больше не достижим из выбранной Harness branch → publish блокируется.
+- Exact merge SHA не прошёл свежую `Harness Release Qualification` → tag/Release не создаются.
+- Последний обязательный Integrity Check Run на exact merge SHA отсутствует, pending или failed → tag/Release не создаются.
+- Check с ожидаемым именем создан не ожидаемым GitHub App → gate считает его недействительным.
 - Metadata не соответствует requested version → publish блокируется до создания tag.
 - Tag существует на другом commit → tag не перемещается.
 - Release branch/tag/release уже существует при Prepare → overwrite не выполняется.
@@ -331,4 +344,4 @@ Harness Release Qualification (exact candidate SHA)
 Publish Harness Release
 ```
 
-Candidate qualification не является разрешением переиспользовать PASS для другого SHA. Exact release merge SHA должен квалифицироваться отдельно перед окончательной публикацией.
+Candidate qualification не является разрешением переиспользовать PASS для другого SHA. При запуске Publish exact release merge SHA автоматически квалифицируется повторно; tag создаётся только после успешной qualification и successful Harness Integrity checks на том же SHA.
