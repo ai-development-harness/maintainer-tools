@@ -66,6 +66,7 @@ jobs:
   preflight:
     name: Resolve exact qualification inputs
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     outputs:
       target_owner: ${{ steps.inputs.outputs.target_owner }}
       target_name: ${{ steps.inputs.outputs.target_name }}
@@ -210,6 +211,7 @@ jobs:
     name: Qualification current Linux / Python 3.13
     needs: preflight
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
       - name: Create target read token
         id: token
@@ -254,6 +256,7 @@ jobs:
     name: Qualification minimum Linux / Python 3.11
     needs: preflight
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - name: Create target read token
         id: token
@@ -298,6 +301,7 @@ jobs:
     name: Qualification Windows / Python 3.13
     needs: preflight
     runs-on: windows-2025
+    timeout-minutes: 20
     steps:
       - name: Create target read token
         id: token
@@ -350,6 +354,7 @@ jobs:
     name: Initialized downstream upgrade canary
     needs: preflight
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
       - name: Create target read token
         id: token
@@ -403,6 +408,7 @@ jobs:
   finalize:
     name: Finalize exact-SHA Release Qualification
     if: always()
+    timeout-minutes: 5
     needs:
       - preflight
       - current

@@ -76,7 +76,14 @@ Tag и GitHub Release здесь **не создаются**. Qualification та
 
 Workflow не копирует stress logic: bounded stress является частью canonical `release-qualification.py --lane current` в Harness core.
 
-Если public canary недоступен, target SHA/ref не совпадают, lane падает, evidence incomplete или finalizer не может обновить Check — qualification не считается успешной.
+Qualification использует **двухуровневую timeout-защиту**:
+
+- canonical core runner ограничивает отдельный gate и пишет machine-readable `TIMEOUT / timeoutSeconds / durationMs` evidence;
+- GitHub Actions job имеет независимый outer `timeout-minutes` на случай зависания самого runner или platform tooling.
+
+Outer budgets намеренно шире обычного inner gate budget: preflight/finalize — 5 минут, minimum — 15 минут, current/windows/downstream — 20 минут. Job-level timeout является last resort и не заменяет inner evidence.
+
+Если public canary недоступен, target SHA/ref не совпадают, lane падает, timeout срабатывает, evidence incomplete или finalizer не может обновить Check — qualification не считается успешной.
 
 Prepare автоматически вызывает этот workflow для prepared candidate SHA. Повторная qualification exact merge SHA перед Publish подключается отдельным publish hard gate и не подменяется candidate PASS.
 
@@ -293,7 +300,8 @@ Workflow найдёт merge commit release PR именно в указанной
 - Source branch сдвинулась во время Prepare → workflow блокируется до push release branch.
 - Exact candidate SHA не достижим из выбранной release/source branch → Release Qualification блокируется.
 - Public `release-canary` нельзя прочитать или разрешить его exact branch SHA → qualification Check завершается failure.
-- Current/minimum/Windows/downstream gate failed/skipped/incomplete → exact-SHA qualification не может стать success.
+- Current/minimum/Windows/downstream gate failed/skipped/incomplete или превысил timeout → exact-SHA qualification не может стать success.
+- Зависание canonical runner/platform tooling дольше outer job timeout → Actions принудительно завершает job, finalizer фиксирует qualification failure.
 - Нет merged release PR в выбранной Harness branch → publish блокируется.
 - Merge commit release PR больше не достижим из выбранной Harness branch → publish блокируется.
 - Exact merge SHA не прошёл свежую `Harness Release Qualification` → tag/Release не создаются.

@@ -81,6 +81,18 @@ class ReleaseWorkflowTest(unittest.TestCase):
         self.assertIn("QUALIFICATION_APP_SLUG", self.publish)
         self.assertIn("MERGE_SHA: ${{ needs.resolve.outputs.merge_sha }}", self.publish)
 
+    def test_all_qualification_jobs_have_outer_timeouts(self) -> None:
+        expected_fragments = (
+            "  preflight:\n    name: Resolve exact qualification inputs\n    runs-on: ubuntu-24.04\n    timeout-minutes: 5",
+            "  current:\n    name: Qualification current Linux / Python 3.13\n    needs: preflight\n    runs-on: ubuntu-24.04\n    timeout-minutes: 20",
+            "  minimum:\n    name: Qualification minimum Linux / Python 3.11\n    needs: preflight\n    runs-on: ubuntu-24.04\n    timeout-minutes: 15",
+            "  windows:\n    name: Qualification Windows / Python 3.13\n    needs: preflight\n    runs-on: windows-2025\n    timeout-minutes: 20",
+            "  downstream:\n    name: Initialized downstream upgrade canary\n    needs: preflight\n    runs-on: ubuntu-24.04\n    timeout-minutes: 20",
+            "  finalize:\n    name: Finalize exact-SHA Release Qualification\n    if: always()\n    timeout-minutes: 5",
+        )
+        for fragment in expected_fragments:
+            self.assertIn(fragment, self.qualification)
+
     def test_qualification_is_reusable_and_manual(self) -> None:
         self.assertIn("workflow_call:", self.qualification)
         self.assertIn("workflow_dispatch:", self.qualification)
