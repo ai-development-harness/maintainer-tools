@@ -16,7 +16,7 @@ on:
         required: true
         type: string
       canary_repository:
-        description: "Private initialized downstream canary repository"
+        description: "Public initialized downstream canary repository"
         required: false
         default: "ai-development-harness/release-canary"
         type: string
@@ -45,7 +45,7 @@ on:
         required: true
         type: string
       canary_repository:
-        description: "Private initialized downstream canary repository"
+        description: "Public initialized downstream canary repository"
         required: true
         default: "ai-development-harness/release-canary"
         type: string
@@ -69,8 +69,6 @@ jobs:
     outputs:
       target_owner: ${{ steps.inputs.outputs.target_owner }}
       target_name: ${{ steps.inputs.outputs.target_name }}
-      canary_owner: ${{ steps.inputs.outputs.canary_owner }}
-      canary_name: ${{ steps.inputs.outputs.canary_name }}
       canary_sha: ${{ steps.canary.outputs.canary_sha }}
       check_id: ${{ steps.check.outputs.check_id }}
     steps:
@@ -114,14 +112,9 @@ jobs:
 
           TARGET_OWNER="${TARGET_REPOSITORY%%/*}"
           TARGET_NAME="${TARGET_REPOSITORY#*/}"
-          CANARY_OWNER="${CANARY_REPOSITORY%%/*}"
-          CANARY_NAME="${CANARY_REPOSITORY#*/}"
-
           {
             echo "target_owner=$TARGET_OWNER"
             echo "target_name=$TARGET_NAME"
-            echo "canary_owner=$CANARY_OWNER"
-            echo "canary_name=$CANARY_NAME"
           } >> "$GITHUB_OUTPUT"
 
       - name: Create target-only GitHub App token
@@ -197,44 +190,18 @@ jobs:
           fi
           echo "check_id=$CHECK_ID" >> "$GITHUB_OUTPUT"
 
-      - name: Require canary in the same GitHub App installation owner
-        shell: bash
-        env:
-          TARGET_OWNER: ${{ steps.inputs.outputs.target_owner }}
-          CANARY_OWNER: ${{ steps.inputs.outputs.canary_owner }}
-        run: |
-          set -euo pipefail
-          if [[ "$TARGET_OWNER" != "$CANARY_OWNER" ]]; then
-            echo "Target and canary must belong to the same GitHub App installation owner." >&2
-            echo "target owner=$TARGET_OWNER, canary owner=$CANARY_OWNER" >&2
-            exit 1
-          fi
-
-      - name: Create target plus private-canary token
-        id: qualification-token
-        uses: actions/create-github-app-token@v3
-        with:
-          client-id: ${{ vars.HARNESS_RELEASE_APP_CLIENT_ID }}
-          private-key: ${{ secrets.HARNESS_RELEASE_APP_PRIVATE_KEY }}
-          owner: ${{ steps.inputs.outputs.target_owner }}
-          repositories: |
-            ${{ steps.inputs.outputs.target_name }}
-            ${{ steps.inputs.outputs.canary_name }}
-          permission-contents: read
-
-      - name: Resolve exact private canary baseline SHA
+      - name: Resolve exact public canary baseline SHA
         id: canary
         shell: bash
         env:
           CANARY_REPOSITORY: ${{ inputs.canary_repository }}
           CANARY_REF: ${{ inputs.canary_ref }}
-          GH_TOKEN: ${{ steps.qualification-token.outputs.token }}
         run: |
           set -euo pipefail
-          CANARY_SHA="$(git ls-remote "https://x-access-token:${GH_TOKEN}@github.com/${CANARY_REPOSITORY}.git" "refs/heads/${CANARY_REF}" | awk 'NR == 1 {print $1}')"
+          CANARY_SHA="$(git ls-remote "https://github.com/${CANARY_REPOSITORY}.git" "refs/heads/${CANARY_REF}" | awk 'NR == 1 {print $1}')"
           if ! [[ "$CANARY_SHA" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "Release App cannot resolve private canary branch '$CANARY_REF' in $CANARY_REPOSITORY." >&2
-            echo "Verify App installation and Contents: read permission for release-canary." >&2
+            echo "Cannot resolve public canary branch '$CANARY_REF' in $CANARY_REPOSITORY." >&2
+            echo "Qualification requires a publicly readable canary repository." >&2
             exit 1
           fi
           echo "canary_sha=$CANARY_SHA" >> "$GITHUB_OUTPUT"
@@ -384,16 +351,14 @@ jobs:
     needs: preflight
     runs-on: ubuntu-24.04
     steps:
-      - name: Create target plus private-canary token
+      - name: Create target read token
         id: token
         uses: actions/create-github-app-token@v3
         with:
           client-id: ${{ vars.HARNESS_RELEASE_APP_CLIENT_ID }}
           private-key: ${{ secrets.HARNESS_RELEASE_APP_PRIVATE_KEY }}
           owner: ${{ needs.preflight.outputs.target_owner }}
-          repositories: |
-            ${{ needs.preflight.outputs.target_name }}
-            ${{ needs.preflight.outputs.canary_name }}
+          repositories: ${{ needs.preflight.outputs.target_name }}
           permission-contents: read
       - name: Checkout exact Harness candidate
         uses: actions/checkout@v7
@@ -404,12 +369,11 @@ jobs:
           path: target
           fetch-depth: 0
           persist-credentials: false
-      - name: Checkout exact private canary baseline
+      - name: Checkout exact public canary baseline
         uses: actions/checkout@v7
         with:
           repository: ${{ inputs.canary_repository }}
           ref: ${{ needs.preflight.outputs.canary_sha }}
-          token: ${{ steps.token.outputs.token }}
           path: canary
           fetch-depth: 0
           persist-credentials: false
