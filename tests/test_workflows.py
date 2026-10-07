@@ -55,6 +55,12 @@ class ReleaseWorkflowTest(unittest.TestCase):
         self.assertIn("Harness source branch moved during release preparation", self.prepare)
         self.assertIn("SOURCE_SHA: ${{ steps.source.outputs.source_sha }}", self.prepare)
 
+    def test_publish_uses_merged_release_pr_resolver(self) -> None:
+        self.assertIn("scripts/resolve_release_pr.py", self.publish)
+        self.assertIn('--state all', self.publish)
+        self.assertIn('--head "$BRANCH"', self.publish)
+        self.assertNotIn("len(matches) != 1", self.publish)
+
     def test_publish_binds_release_pr_and_commit_to_selected_branch(self) -> None:
         self.assertIn("ref: ${{ steps.normalize.outputs.harness_branch }}", self.publish)
         self.assertIn('--base "$HARNESS_BRANCH"', self.publish)
