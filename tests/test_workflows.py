@@ -12,6 +12,16 @@ QUALIFICATION = ROOT / ".github" / "workflows" / "release-qualification.yml"
 CONFIG = ROOT / "config" / "release.json"
 
 
+def job_block(text: str, name: str) -> str:
+    match = re.search(
+        rf"(?ms)^  {re.escape(name)}:\\n(?P<body>.*?)(?=^  [a-z][a-z0-9_-]*:\\n|\\Z)",
+        text,
+    )
+    if not match:
+        raise AssertionError(f"workflow job {name!r} not found")
+    return match.group("body")
+
+
 def input_block(text: str, name: str) -> str:
     match = re.search(
         rf"(?m)^      {re.escape(name)}:\n(?P<body>(?:^        [^\n]*(?:\n|$))+)",
@@ -80,6 +90,19 @@ class ReleaseWorkflowTest(unittest.TestCase):
         self.assertIn("check-runs?per_page=100", self.publish)
         self.assertIn("QUALIFICATION_APP_SLUG", self.publish)
         self.assertIn("MERGE_SHA: ${{ needs.resolve.outputs.merge_sha }}", self.publish)
+
+    def test_all_qualification_jobs_have_outer_timeouts(self) -> None:
+        expected = {
+            "preflight": 5,
+            "current": 20,
+            "minimum": 15,
+            "windows": 20,
+            "downstream": 20,
+            "finalize": 5,
+        }
+        for job, minutes in expected.items():
+            block = job_block(self.qualification, job)
+            self.assertIn(f"timeout-minutes: {minutes}", block)
 
     def test_qualification_is_reusable_and_manual(self) -> None:
         self.assertIn("workflow_call:", self.qualification)
