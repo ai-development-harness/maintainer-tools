@@ -1,0 +1,533 @@
+name: Harness Release Qualification
+
+on:
+  workflow_call:
+    inputs:
+      target_repository:
+        description: "Harness repository in owner/name form"
+        required: true
+        type: string
+      target_ref:
+        description: "Harness branch containing target SHA"
+        required: true
+        type: string
+      target_sha:
+        description: "Exact Harness candidate commit SHA"
+        required: true
+        type: string
+      canary_repository:
+        description: "Private initialized downstream canary repository"
+        required: false
+        default: "ai-development-harness/release-canary"
+        type: string
+      canary_ref:
+        description: "Accepted stable canary branch"
+        required: false
+        default: "main"
+        type: string
+    secrets:
+      HARNESS_RELEASE_APP_PRIVATE_KEY:
+        required: true
+
+  workflow_dispatch:
+    inputs:
+      target_repository:
+        description: "Harness repository in owner/name form"
+        required: true
+        default: "ai-development-harness/ai-development-harness-template"
+        type: string
+      target_ref:
+        description: "Harness branch containing target SHA"
+        required: true
+        type: string
+      target_sha:
+        description: "Exact Harness candidate commit SHA"
+        required: true
+        type: string
+      canary_repository:
+        description: "Private initialized downstream canary repository"
+        required: true
+        default: "ai-development-harness/release-canary"
+        type: string
+      canary_ref:
+        description: "Accepted stable canary branch"
+        required: true
+        default: "main"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: harness-release-qualification-${{ inputs.target_repository }}-${{ inputs.target_sha }}
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    name: Resolve exact qualification inputs
+    runs-on: ubuntu-24.04
+    outputs:
+      target_owner: ${{ steps.inputs.outputs.target_owner }}
+      target_name: ${{ steps.inputs.outputs.target_name }}
+      canary_owner: ${{ steps.inputs.outputs.canary_owner }}
+      canary_name: ${{ steps.inputs.outputs.canary_name }}
+      canary_sha: ${{ steps.canary.outputs.canary_sha }}
+      check_id: ${{ steps.check.outputs.check_id }}
+    steps:
+      - name: Validate qualification inputs
+        id: inputs
+        shell: bash
+        env:
+          TARGET_REPOSITORY: ${{ inputs.target_repository }}
+          TARGET_REF: ${{ inputs.target_ref }}
+          TARGET_SHA: ${{ inputs.target_sha }}
+          CANARY_REPOSITORY: ${{ inputs.canary_repository }}
+          CANARY_REF: ${{ inputs.canary_ref }}
+        run: |
+          set -euo pipefail
+
+          parse_repo() {
+            local value="$1"
+            local label="$2"
+            if ! [[ "$value" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+              echo "$label must use owner/name form, got: '$value'" >&2
+              exit 2
+            fi
+          }
+
+          parse_repo "$TARGET_REPOSITORY" "target_repository"
+          parse_repo "$CANARY_REPOSITORY" "canary_repository"
+
+          if ! [[ "$TARGET_SHA" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "target_sha must be an exact 40-hex Git commit SHA." >&2
+            exit 2
+          fi
+
+          for pair in "target:$TARGET_REF" "canary:$CANARY_REF"; do
+            label="${pair%%:*}"
+            ref="${pair#*:}"
+            if [[ -z "$ref" || "$ref" == refs/* ]] || ! git check-ref-format --branch "$ref" >/dev/null 2>&1; then
+              echo "$label ref must be a valid short branch name, got: '$ref'" >&2
+              exit 2
+            fi
+          done
+
+          TARGET_OWNER="${TARGET_REPOSITORY%%/*}"
+          TARGET_NAME="${TARGET_REPOSITORY#*/}"
+          CANARY_OWNER="${CANARY_REPOSITORY%%/*}"
+          CANARY_NAME="${CANARY_REPOSITORY#*/}"
+
+          {
+            echo "target_owner=$TARGET_OWNER"
+            echo "target_name=$TARGET_NAME"
+            echo "canary_owner=$CANARY_OWNER"
+            echo "canary_name=$CANARY_NAME"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create target-only GitHub App token
+        id: target-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.HARNESS_RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.HARNESS_RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ steps.inputs.outputs.target_owner }}
+          repositories: ${{ steps.inputs.outputs.target_name }}
+          permission-contents: read
+          permission-checks: write
+
+      - name: Verify exact target SHA and branch ancestry
+        shell: bash
+        env:
+          TARGET_REPOSITORY: ${{ inputs.target_repository }}
+          TARGET_REF: ${{ inputs.target_ref }}
+          TARGET_SHA: ${{ inputs.target_sha }}
+          GH_TOKEN: ${{ steps.target-token.outputs.token }}
+        run: |
+          set -euo pipefail
+
+          OBSERVED_SHA="$(gh api "repos/$TARGET_REPOSITORY/commits/$TARGET_SHA" --jq .sha)"
+          if [[ "$OBSERVED_SHA" != "$TARGET_SHA" ]]; then
+            echo "Target commit identity mismatch: expected $TARGET_SHA, got $OBSERVED_SHA." >&2
+            exit 1
+          fi
+
+          TMP="$(mktemp -d)"
+          trap 'rm -rf "$TMP"' EXIT
+          git -C "$TMP" init -q
+          git -C "$TMP" remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${TARGET_REPOSITORY}.git"
+          git -C "$TMP" fetch -q --no-tags origin "$TARGET_REF"
+          REF_SHA="$(git -C "$TMP" rev-parse FETCH_HEAD)"
+          git -C "$TMP" fetch -q --no-tags origin "$TARGET_SHA"
+          if ! git -C "$TMP" merge-base --is-ancestor "$TARGET_SHA" "$REF_SHA"; then
+            echo "Target SHA $TARGET_SHA is not reachable from branch '$TARGET_REF' ($REF_SHA)." >&2
+            exit 1
+          fi
+
+      - name: Create exact-SHA qualification Check
+        id: check
+        shell: bash
+        env:
+          TARGET_REPOSITORY: ${{ inputs.target_repository }}
+          TARGET_SHA: ${{ inputs.target_sha }}
+          GH_TOKEN: ${{ steps.target-token.outputs.token }}
+          DETAILS_URL: "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+        run: |
+          set -euo pipefail
+
+          BODY="$(python - <<'PY'
+          import json
+          import os
+          print(json.dumps({
+              "name": "Harness Release Qualification",
+              "head_sha": os.environ["TARGET_SHA"],
+              "status": "in_progress",
+              "details_url": os.environ["DETAILS_URL"],
+              "output": {
+                  "title": "Release qualification started",
+                  "summary": "Qualification is running for this exact Harness commit.",
+              },
+          }))
+          PY
+          )"
+
+          CHECK_ID="$(gh api --method POST -H "Accept: application/vnd.github+json" "repos/$TARGET_REPOSITORY/check-runs" --input - <<<"$BODY" --jq .id)"
+          if [[ -z "$CHECK_ID" ]]; then
+            echo "Failed to create Harness Release Qualification check." >&2
+            exit 1
+          fi
+          echo "check_id=$CHECK_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Require canary in the same GitHub App installation owner
+        shell: bash
+        env:
+          TARGET_OWNER: ${{ steps.inputs.outputs.target_owner }}
+          CANARY_OWNER: ${{ steps.inputs.outputs.canary_owner }}
+        run: |
+          set -euo pipefail
+          if [[ "$TARGET_OWNER" != "$CANARY_OWNER" ]]; then
+            echo "Target and canary must belong to the same GitHub App installation owner." >&2
+            echo "target owner=$TARGET_OWNER, canary owner=$CANARY_OWNER" >&2
+            exit 1
+          fi
+
+      - name: Create target plus private-canary token
+        id: qualification-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.HARNESS_RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.HARNESS_RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ steps.inputs.outputs.target_owner }}
+          repositories: |
+            ${{ steps.inputs.outputs.target_name }}
+            ${{ steps.inputs.outputs.canary_name }}
+          permission-contents: read
+
+      - name: Resolve exact private canary baseline SHA
+        id: canary
+        shell: bash
+        env:
+          CANARY_REPOSITORY: ${{ inputs.canary_repository }}
+          CANARY_REF: ${{ inputs.canary_ref }}
+          GH_TOKEN: ${{ steps.qualification-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          CANARY_SHA="$(git ls-remote "https://x-access-token:${GH_TOKEN}@github.com/${CANARY_REPOSITORY}.git" "refs/heads/${CANARY_REF}" | awk 'NR == 1 {print $1}')"
+          if ! [[ "$CANARY_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Release App cannot resolve private canary branch '$CANARY_REF' in $CANARY_REPOSITORY." >&2
+            echo "Verify App installation and Contents: read permission for release-canary." >&2
+            exit 1
+          fi
+          echo "canary_sha=$CANARY_SHA" >> "$GITHUB_OUTPUT"
+
+  current:
+    name: Qualification current Linux / Python 3.13
+    needs: preflight
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Create target read token
+        id: token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.HARNESS_RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.HARNESS_RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ needs.preflight.outputs.target_owner }}
+          repositories: ${{ needs.preflight.outputs.target_name }}
+          permission-contents: read
+      - name: Checkout exact Harness candidate
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ inputs.target_repository }}
+          ref: ${{ inputs.target_sha }}
+          token: ${{ steps.token.outputs.token }}
+          path: target
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Setup current Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - name: Run canonical current qualification lane
+        shell: bash
+        working-directory: target
+        env:
+          TARGET_SHA: ${{ inputs.target_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          python3 .harness/tools/release-qualification.py --lane current --expect-sha "$TARGET_SHA" --expected-python 3.13 --json | tee ../qualification-current.json
+      - name: Upload current-lane evidence
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: qualification-current
+          path: qualification-current.json
+          if-no-files-found: warn
+
+  minimum:
+    name: Qualification minimum Linux / Python 3.11
+    needs: preflight
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Create target read token
+        id: token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.HARNESS_RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.HARNESS_RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ needs.preflight.outputs.target_owner }}
+          repositories: ${{ needs.preflight.outputs.target_name }}
+          permission-contents: read
+      - name: Checkout exact Harness candidate
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ inputs.target_repository }}
+          ref: ${{ inputs.target_sha }}
+          token: ${{ steps.token.outputs.token }}
+          path: target
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Setup minimum Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - name: Run canonical minimum qualification lane
+        shell: bash
+        working-directory: target
+        env:
+          TARGET_SHA: ${{ inputs.target_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          python3 .harness/tools/release-qualification.py --lane minimum --expect-sha "$TARGET_SHA" --expected-python 3.11 --json | tee ../qualification-minimum.json
+      - name: Upload minimum-lane evidence
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: qualification-minimum
+          path: qualification-minimum.json
+          if-no-files-found: warn
+
+  windows:
+    name: Qualification Windows / Python 3.13
+    needs: preflight
+    runs-on: windows-2025
+    steps:
+      - name: Create target read token
+        id: token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.HARNESS_RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.HARNESS_RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ needs.preflight.outputs.target_owner }}
+          repositories: ${{ needs.preflight.outputs.target_name }}
+          permission-contents: read
+      - name: Checkout exact Harness candidate
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ inputs.target_repository }}
+          ref: ${{ inputs.target_sha }}
+          token: ${{ steps.token.outputs.token }}
+          path: target
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Setup Windows Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - name: Run canonical Windows qualification lane
+        shell: pwsh
+        working-directory: target
+        env:
+          TARGET_SHA: ${{ inputs.target_sha }}
+        run: |
+          $actual = git rev-parse HEAD
+          if ($actual -ne $env:TARGET_SHA) {
+            Write-Error "Exact SHA mismatch: $actual != $env:TARGET_SHA"
+            exit 1
+          }
+          python .harness/tools/release-qualification.py --lane windows --expect-sha $env:TARGET_SHA --expected-python 3.13 --json > ../qualification-windows.json
+          $code = $LASTEXITCODE
+          Get-Content ../qualification-windows.json
+          if ($code -ne 0) {
+            exit $code
+          }
+      - name: Upload Windows-lane evidence
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: qualification-windows
+          path: qualification-windows.json
+          if-no-files-found: warn
+
+  downstream:
+    name: Initialized downstream upgrade canary
+    needs: preflight
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Create target plus private-canary token
+        id: token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.HARNESS_RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.HARNESS_RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ needs.preflight.outputs.target_owner }}
+          repositories: |
+            ${{ needs.preflight.outputs.target_name }}
+            ${{ needs.preflight.outputs.canary_name }}
+          permission-contents: read
+      - name: Checkout exact Harness candidate
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ inputs.target_repository }}
+          ref: ${{ inputs.target_sha }}
+          token: ${{ steps.token.outputs.token }}
+          path: target
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Checkout exact private canary baseline
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ inputs.canary_repository }}
+          ref: ${{ needs.preflight.outputs.canary_sha }}
+          token: ${{ steps.token.outputs.token }}
+          path: canary
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Setup qualification Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - name: Run initialized upgrade qualification
+        shell: bash
+        working-directory: target
+        env:
+          TARGET_SHA: ${{ inputs.target_sha }}
+          CANARY_SHA: ${{ needs.preflight.outputs.canary_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(git -C ../canary rev-parse HEAD)" = "$CANARY_SHA"
+          python3 .harness/tools/release-upgrade-qualification.py --baseline-project ../canary --baseline-sha "$CANARY_SHA" --candidate-source . --candidate-sha "$TARGET_SHA" --json | tee ../qualification-downstream.json
+      - name: Upload downstream evidence
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: qualification-downstream
+          path: qualification-downstream.json
+          if-no-files-found: warn
+
+  finalize:
+    name: Finalize exact-SHA Release Qualification
+    if: always()
+    needs:
+      - preflight
+      - current
+      - minimum
+      - windows
+      - downstream
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Parse target repository
+        id: target
+        shell: bash
+        env:
+          TARGET_REPOSITORY: ${{ inputs.target_repository }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$TARGET_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+            echo "Invalid target repository; cannot finalize qualification check." >&2
+            exit 2
+          fi
+          echo "owner=${TARGET_REPOSITORY%%/*}" >> "$GITHUB_OUTPUT"
+          echo "name=${TARGET_REPOSITORY#*/}" >> "$GITHUB_OUTPUT"
+      - name: Create target-only Check token
+        id: token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.HARNESS_RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.HARNESS_RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ steps.target.outputs.owner }}
+          repositories: ${{ steps.target.outputs.name }}
+          permission-contents: read
+          permission-checks: write
+      - name: Finalize exact-SHA Check
+        shell: bash
+        env:
+          TARGET_REPOSITORY: ${{ inputs.target_repository }}
+          TARGET_SHA: ${{ inputs.target_sha }}
+          CANARY_SHA: ${{ needs.preflight.outputs.canary_sha }}
+          CHECK_ID: ${{ needs.preflight.outputs.check_id }}
+          PREFLIGHT_RESULT: ${{ needs.preflight.result }}
+          CURRENT_RESULT: ${{ needs.current.result }}
+          MINIMUM_RESULT: ${{ needs.minimum.result }}
+          WINDOWS_RESULT: ${{ needs.windows.result }}
+          DOWNSTREAM_RESULT: ${{ needs.downstream.result }}
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "$CHECK_ID" ]]; then
+            echo "Qualification check was not created; preflight failed before exact-SHA Check creation." >&2
+            exit 1
+          fi
+
+          CONCLUSION="success"
+          for result in "$PREFLIGHT_RESULT" "$CURRENT_RESULT" "$MINIMUM_RESULT" "$WINDOWS_RESULT" "$DOWNSTREAM_RESULT"; do
+            if [[ "$result" != "success" ]]; then
+              CONCLUSION="failure"
+            fi
+          done
+
+          SUMMARY="$(cat <<EOF
+          exact candidate SHA: $TARGET_SHA
+          exact canary baseline SHA: ${CANARY_SHA:-unresolved}
+
+          - preflight: $PREFLIGHT_RESULT
+          - current: $CURRENT_RESULT
+          - minimum: $MINIMUM_RESULT
+          - windows: $WINDOWS_RESULT
+          - downstream: $DOWNSTREAM_RESULT
+          EOF
+          )"
+
+          BODY="$(CONCLUSION="$CONCLUSION" SUMMARY="$SUMMARY" python - <<'PY'
+          import json
+          import os
+          from datetime import datetime, timezone
+
+          print(json.dumps({
+              "status": "completed",
+              "conclusion": os.environ["CONCLUSION"],
+              "completed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+              "output": {
+                  "title": f"Release qualification {os.environ['CONCLUSION']}",
+                  "summary": os.environ["SUMMARY"],
+              },
+          }))
+          PY
+          )"
+
+          gh api --method PATCH -H "Accept: application/vnd.github+json" "repos/$TARGET_REPOSITORY/check-runs/$CHECK_ID" --input - <<<"$BODY" >/dev/null
+          if [[ "$CONCLUSION" != "success" ]]; then
+            exit 1
+          fi
