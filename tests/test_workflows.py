@@ -12,16 +12,6 @@ QUALIFICATION = ROOT / ".github" / "workflows" / "release-qualification.yml"
 CONFIG = ROOT / "config" / "release.json"
 
 
-def job_block(text: str, name: str) -> str:
-    match = re.search(
-        rf"(?ms)^  {re.escape(name)}:\\n(?P<body>.*?)(?=^  [a-z][a-z0-9_-]*:\\n|\\Z)",
-        text,
-    )
-    if not match:
-        raise AssertionError(f"workflow job {name!r} not found")
-    return match.group("body")
-
-
 def input_block(text: str, name: str) -> str:
     match = re.search(
         rf"(?m)^      {re.escape(name)}:\n(?P<body>(?:^        [^\n]*(?:\n|$))+)",
@@ -92,17 +82,16 @@ class ReleaseWorkflowTest(unittest.TestCase):
         self.assertIn("MERGE_SHA: ${{ needs.resolve.outputs.merge_sha }}", self.publish)
 
     def test_all_qualification_jobs_have_outer_timeouts(self) -> None:
-        expected = {
-            "preflight": 5,
-            "current": 20,
-            "minimum": 15,
-            "windows": 20,
-            "downstream": 20,
-            "finalize": 5,
-        }
-        for job, minutes in expected.items():
-            block = job_block(self.qualification, job)
-            self.assertIn(f"timeout-minutes: {minutes}", block)
+        expected_fragments = (
+            "  preflight:\n    name: Resolve exact qualification inputs\n    runs-on: ubuntu-24.04\n    timeout-minutes: 5",
+            "  current:\n    name: Qualification current Linux / Python 3.13\n    needs: preflight\n    runs-on: ubuntu-24.04\n    timeout-minutes: 20",
+            "  minimum:\n    name: Qualification minimum Linux / Python 3.11\n    needs: preflight\n    runs-on: ubuntu-24.04\n    timeout-minutes: 15",
+            "  windows:\n    name: Qualification Windows / Python 3.13\n    needs: preflight\n    runs-on: windows-2025\n    timeout-minutes: 20",
+            "  downstream:\n    name: Initialized downstream upgrade canary\n    needs: preflight\n    runs-on: ubuntu-24.04\n    timeout-minutes: 20",
+            "  finalize:\n    name: Finalize exact-SHA Release Qualification\n    if: always()\n    timeout-minutes: 5",
+        )
+        for fragment in expected_fragments:
+            self.assertIn(fragment, self.qualification)
 
     def test_qualification_is_reusable_and_manual(self) -> None:
         self.assertIn("workflow_call:", self.qualification)
