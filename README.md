@@ -91,7 +91,7 @@ Prepare автоматически вызывает этот workflow для pre
 
 `.github/workflows/publish-release.yml` запускается после merge release PR.
 
-Он требует снова явно указать Harness branch, находит именно merged PR `release/vX.Y.Z` с этой base branch и разрешает его exact merge SHA. Затем Publish **сам запускает Release Qualification для exact merge SHA** и не переиспользует candidate PASS. После успешной qualification отдельный hard gate читает Check Runs этого же SHA и требует последние успешные:
+Он требует снова явно указать Harness branch, находит **единственный merged** PR `release/vX.Y.Z` с этой base branch и разрешает его exact merge SHA. Исторические closed/unmerged candidates того же version/head/title игнорируются: это позволяет безопасно пересобирать release candidate после fail-closed qualification, не создавая ambiguity при Publish. Затем Publish **сам запускает Release Qualification для exact merge SHA** и не переиспользует candidate PASS. После успешной qualification отдельный hard gate читает Check Runs этого же SHA и требует последние успешные:
 - `Harness Release Qualification` от configured Release Bot App;
 - `Validate Harness` от GitHub Actions;
 - `Validate Python 3.11 compatibility` от GitHub Actions;
