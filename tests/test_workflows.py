@@ -84,12 +84,13 @@ class ReleaseWorkflowTest(unittest.TestCase):
         self.assertIn("release-upgrade-qualification.py", self.qualification)
         self.assertNotIn("run-stress-tests.py", self.qualification)
 
-    def test_private_canary_access_is_scoped_and_exact(self) -> None:
+    def test_public_canary_is_read_without_app_scope(self) -> None:
         self.assertIn('default: "ai-development-harness/release-canary"', self.qualification)
-        self.assertIn("${{ steps.inputs.outputs.canary_name }}", self.qualification)
-        self.assertIn("permission-contents: read", self.qualification)
+        self.assertIn('https://github.com/${CANARY_REPOSITORY}.git', self.qualification)
         self.assertIn("canary_sha=", self.qualification)
-        self.assertIn("Release App cannot resolve private canary branch", self.qualification)
+        self.assertIn("publicly readable canary repository", self.qualification)
+        self.assertNotIn("private-canary", self.qualification)
+        self.assertNotIn("canary_name", self.qualification)
 
     def test_prepare_exports_and_qualifies_exact_candidate_sha(self) -> None:
         self.assertIn("candidate_sha: ${{ steps.release-commit.outputs.candidate_sha }}", self.prepare)
