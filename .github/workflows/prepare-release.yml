@@ -40,6 +40,10 @@ concurrency:
 jobs:
   prepare:
     runs-on: ubuntu-latest
+    outputs:
+      target_repository: ${{ steps.config.outputs.target_repository }}
+      release_branch: ${{ steps.preflight.outputs.branch }}
+      candidate_sha: ${{ steps.release-commit.outputs.candidate_sha }}
     steps:
       # Пробелы из формы workflow_dispatch ломают имена ветки/PR/tag: нормализуем
       # inputs один раз и дальше используем только outputs этого шага.
@@ -236,6 +240,7 @@ jobs:
         run: python3 "${{ steps.layout.outputs.validator_path }}" --mode ci
 
       - name: Commit and push release branch
+        id: release-commit
         shell: bash
         env:
           VERSION: ${{ steps.normalize.outputs.version }}
@@ -271,6 +276,14 @@ jobs:
           git -C target commit -m "chore: подготовить release ${VERSION}"
           git -C target push origin "HEAD:refs/heads/${BRANCH}"
 
+          CANDIDATE_SHA="$(git -C target rev-parse HEAD)"
+          REMOTE_CANDIDATE_SHA="$(git -C target ls-remote --exit-code --heads origin "refs/heads/${BRANCH}" | awk 'NR == 1 {print $1}')"
+          if [[ "$REMOTE_CANDIDATE_SHA" != "$CANDIDATE_SHA" ]]; then
+            echo "Release candidate branch moved or push did not produce expected SHA: local=$CANDIDATE_SHA remote=$REMOTE_CANDIDATE_SHA" >&2
+            exit 1
+          fi
+          echo "candidate_sha=$CANDIDATE_SHA" >> "$GITHUB_OUTPUT"
+
       - name: Create release pull request
         shell: bash
         env:
@@ -298,8 +311,11 @@ jobs:
           - manifest, lock и update graph синхронизированы;
           - transition \`${CURRENT} → ${VERSION}\`: \`reloadRequired=${{ inputs.reload_required }}\`;
           - Harness Integrity validator пройден до создания PR;
+          - после создания candidate автоматически запускается **Harness Release Qualification** для exact candidate SHA;
+          - qualification не создаёт tag/release и не меняет release metadata;
           - tag/release **не создаются** этим workflow.
 
+          Перед merge проверь отдельный Check **Harness Release Qualification** на candidate commit.
           После review и squash merge этого PR запусти workflow **Publish Harness Release** с теми же version и Harness branch.
           EOF
 
@@ -309,3 +325,15 @@ jobs:
             --head "$BRANCH" \
             --title "chore: подготовить release ${VERSION}" \
             --body-file /tmp/release-pr.md
+
+
+  qualify:
+    name: Qualify prepared release candidate
+    needs: prepare
+    uses: ./.github/workflows/release-qualification.yml
+    with:
+      target_repository: ${{ needs.prepare.outputs.target_repository }}
+      target_ref: ${{ needs.prepare.outputs.release_branch }}
+      target_sha: ${{ needs.prepare.outputs.candidate_sha }}
+    secrets:
+      HARNESS_RELEASE_APP_PRIVATE_KEY: ${{ secrets.HARNESS_RELEASE_APP_PRIVATE_KEY }}
