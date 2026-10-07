@@ -60,8 +60,8 @@ Tag и GitHub Release здесь **не создаются**. Qualification та
 
 1. валидирует `target_repository / target_ref / target_sha` и доказывает, что exact SHA достижим из выбранной Harness branch;
 2. создаёт в Harness repository отдельный GitHub Check с устойчивым именем `Harness Release Qualification`, привязанный именно к `target_sha`;
-3. создаёт scoped App token только для target repository и отдельный read-only token для target + private `release-canary`;
-4. разрешает exact SHA текущего accepted canary `main` и использует его как immutable baseline конкретного run;
+3. создаёт scoped App token только для target Harness repository;
+4. читает public `release-canary` без App credentials, разрешает exact SHA accepted canary `main` и использует его как immutable baseline конкретного run;
 5. запускает canonical core lanes:
    - current Linux / Python 3.13;
    - minimum Linux / Python 3.11;
@@ -72,7 +72,7 @@ Tag и GitHub Release здесь **не создаются**. Qualification та
 
 Workflow не копирует stress logic: bounded stress является частью canonical `release-qualification.py --lane current` в Harness core.
 
-Если private canary недоступен release App, target SHA/ref не совпадают, lane падает, evidence incomplete или finalizer не может обновить Check — qualification не считается успешной.
+Если public canary недоступен, target SHA/ref не совпадают, lane падает, evidence incomplete или finalizer не может обновить Check — qualification не считается успешной.
 
 Prepare автоматически вызывает этот workflow для prepared candidate SHA. Повторная qualification exact merge SHA перед Publish подключается отдельным publish hard gate и не подменяется candidate PASS.
 
@@ -140,14 +140,13 @@ Repository permissions:
 
 Webhook не требуется.
 
-После создания установи App в организации `ai-development-harness` **только** на два release-control repository:
+После создания установи App в организации `ai-development-harness` **только** на:
 
 ```text
 ai-development-harness-template
-release-canary
 ```
 
-`release-canary` private, поэтому доступ maintainer/user через обычный GitHub account не доказывает доступ release automation. Qualification получает scoped installation token и должна читать canary именно через App.
+`release-canary` публичный и qualification читает его без App credentials. Добавлять canary в installation GitHub App не требуется.
 
 Инструкция GitHub:
 
@@ -190,7 +189,7 @@ Client ID находится на странице настроек создан
 HARNESS_RELEASE_APP_CLIENT_ID
 ```
 
-Workflow получает короткоживущие installation tokens через `actions/create-github-app-token@v3`. Prepare/Publish scope-ят token под нужные mutating permissions target repository; Release Qualification отдельно создаёт target-only token для exact-SHA Check и read-only token для target + private canary.
+Workflow получает короткоживущие installation tokens через `actions/create-github-app-token@v3`. Prepare/Publish scope-ят token под нужные mutating permissions target repository; Release Qualification создаёт target-only token для exact-SHA Check и Harness checkout. Public canary читается без App token.
 
 Подробности официального сценария GitHub App + Actions:
 
@@ -283,7 +282,7 @@ Workflow найдёт merge commit release PR именно в указанной
 - Harness branch не указана, невалидна или не существует → workflow блокируется; fallback на `main` отсутствует.
 - Source branch сдвинулась во время Prepare → workflow блокируется до push release branch.
 - Exact candidate SHA не достижим из выбранной release/source branch → Release Qualification блокируется.
-- Release App не может прочитать private `release-canary` → qualification Check завершается failure; fallback на public/product repository отсутствует.
+- Public `release-canary` нельзя прочитать или разрешить его exact branch SHA → qualification Check завершается failure.
 - Current/minimum/Windows/downstream gate failed/skipped/incomplete → exact-SHA qualification не может стать success.
 - Нет merged release PR в выбранной Harness branch → publish блокируется.
 - Merge commit release PR больше не достижим из выбранной Harness branch → publish блокируется.
