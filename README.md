@@ -103,6 +103,38 @@ Tag привязывается **не к текущему HEAD выбранно�
 
 Publish идемпотентен для частичного сбоя: существующий tag допустим только если уже указывает на ожидаемый commit; существующий Release допустим только с ожидаемым названием.
 
+
+### Automatic release-canary promotion
+
+\`.github/workflows/promote-canary.yml\` создаёт **отдельный PR** с обновлением принятого canary baseline **после успешного Publish Harness Release**. Публикация и продвижение независимы: ошибка promotion не отменяет уже опубликованный tag или GitHub Release.
+
+Триггеры: \`workflow_run\` (только успешный \`Publish Harness Release\` из \`main\`), \`schedule\` каждый час в минуту 17 UTC (резерв для ранее опубликованных/пропущенных релизов) и ручной \`workflow_dispatch\` без обязательных параметров. Schedule выполняет повторную сверку; если canary уже соответствует последнему стабильному релизу, изменений нет.
+
+**Алгоритм:**
+
+1. Прочитать exact \`release-canary/main\` и version/source commit из canary lock; найти **ближайший следующий** опубликованный стабильный Harness Release по SemVer. Draft и prerelease не подходят. При нескольких пропущенных версиях нельзя перепрыгивать через промежуточную: сначала review/merge PR первого релиза.
+2. Разрешить immutable target tag/SHA, удостовериться, что commit достижим из Harness \`main\` и граф содержит **прямой** переход из установленной stable; отклонить другие ветки/неполную identity. При существующей \`promotion/vX.Y.Z\` не перезаписывать её и не создавать дубликат PR.
+3. Создать отдельный checkout точного baseline, зафиксировать Git blob SHA/mode project-owned файлов. Вызвать **настоящий** \`harness-update.py apply --to vX.Y.Z\` и при reload boundary продолжить в новом Python-процессе. Запрещено переписывать manifest/lock вручную ради успешного теста.
+4. Проверить project schema (\`PROJECT RECONCILE\` при необходимости), \`HARNESS STATUS\`, \`HARNESS DOCTOR\`, validator, весь \`run-self-tests.py\`, сохранность исходных project-owned файлов и запрет неожиданных project additions. Затем повторить APPLY и доказать \`NO_UPDATE\` и отсутствие canonical mutation.
+5. Записать \`docs/baseline-promotions/vX.Y.Z.md\` в canary, создать \`promotion/vX.Y.Z\` и PR в \`release-canary/main\` под отдельным GitHub App installation token, ограниченным **только canary**. Токен для push не доступен командам обновления и self-tests.
+6. **Не сливать PR автоматически.** Независимый \`Harness Integrity\` по PR проверяет \`Validate Harness\`, \`Validate Python 3.11 compatibility\`, \`Validate Windows boundaries\`. После проверки diff и успешного CI maintainer вручную сливает PR; только затем новый baseline считается принятым.
+
+Workflow не изменяет \`release-canary/main\` напрямую. Если target/branch/review/validator/update конфликтуют, он останавливается, не публикует неподтверждённую версию и оставляет диагностику Actions.
+
+**Одноразовая настройка GitHub App** — обязательна для автономного создания PR:
+
+- Открой GitHub App **AI Harness Release Bot** организации и добавь \`release-canary\` в её установку (раньше она была установлена только на \`ai-development-harness-template\`).
+- В \`Permissions & events\` добавь repository permission **Workflows: Read & write**, оставь **Contents: Read & write** и **Pull requests: Read & write**. Подтверди изменение permissions/installation. Workflows write необходим, потому что штатный Harness updater может менять \`.github/workflows/harness-integrity.yml\`; обычный \`GITHUB_TOKEN\` не годится для этой операции.
+- Переменная \`HARNESS_RELEASE_APP_CLIENT_ID\` и секрет \`HARNESS_RELEASE_APP_PRIVATE_KEY\` уже используются в \`maintainer-tools\`; дополнительных секретов автоматизация не требует. Из workflow запрашивается токен с разрешениями \`contents: write\`, \`pull-requests: write\`, \`workflows: write\` **только** для \`release-canary\`.
+- Настрой в \`release-canary\` branch protection/ruleset для \`main\` с required checks **Validate Harness**, **Validate Python 3.11 compatibility**, **Validate Windows boundaries** и review перед merge. Само создание PR не делает CI обязательным правилом ветки.
+
+PR, созданный через GitHub App token, автоматически запускает \`pull_request\` CI (в отличие от обычного \`GITHUB_TOKEN\`, для которого могут требоваться отдельные approvals). Автоматизация **никогда не использует auto-merge**.
+
+**Операционная поддержка:** workflow — [Promote Published Harness Canary](https://github.com/ai-development-harness/maintainer-tools/actions/workflows/promote-canary.yml). Для разового повтора запусти \`Run workflow\` в \`maintainer-tools/main\`: он выбирает ближайший непринятый stable. Если PR уже открыт, дождись CI и заверши review/merge; новый запуск ничего не перезапишет. После успешного merge будет доступно продвижение следующего опубликованного релиза (по расписанию или вручную).
+
+**Regression:** \`python -m unittest discover -s tests -v\` включает select/no-op, несколько пропущенных releases, запрет prerelease и mismatched refs, reload/idempotence, preservation project-owned и direct transition. Доступ к GitHub App/срабатывание удалённого workflow проверяется отдельно уже после установки App; локальные unit-тесты не подтверждают права GitHub.
+
+
 ## Конфигурация
 
 Target repository и допустимые release layouts находятся в:
