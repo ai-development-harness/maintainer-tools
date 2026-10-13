@@ -153,9 +153,16 @@ jobs:
             echo "Canary main moved during selection; rerun with a fresh baseline." >&2
             exit 1
           }
-          # Не перезаписываем чужую ветку и не открываем PR-дубликат.
+          # Не перезаписываем существующую ветку. Но orphan branch без PR —
+          # это частичный сбой прошлой попытки, не успешная идемпотентность.
           if git -C canary ls-remote --exit-code --heads origin "refs/heads/${BRANCH}" >/dev/null 2>&1; then
-            echo "::notice::Existing promotion branch ${BRANCH}, no duplicate."
+            OPEN_PRS="$(gh pr list --repo "$CANARY_REPOSITORY" --state open \
+              --head "$BRANCH" --base main --json number --jq 'length')"
+            if [[ "$OPEN_PRS" != "1" ]]; then
+              echo "Promotion branch ${BRANCH} exists without exactly one open PR; manual recovery required." >&2
+              exit 1
+            fi
+            echo "::notice::Existing promotion PR for ${BRANCH}; no duplicate."
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
