@@ -336,8 +336,8 @@ def promote(
         raise PromotionError("Harness source checkout SHA differs from published tag")
     if git(source, "rev-parse", "--verify", f"refs/tags/{target_tag}^{{commit}}") != target_sha:
         raise PromotionError("target tag did not resolve to immutable target SHA")
-    if run(["git", "merge-base", "--is-ancestor", target_sha, "refs/remotes/origin/main"], source):
-        raise PromotionError("unreachable source state")  # pragma: no cover
+    # Публикация maintenance-ветки не должна менять canary основной release-линии.
+    git(source, "merge-base", "--is-ancestor", target_sha, "refs/remotes/origin/main")
 
     baseline_lock = read_object(project / ".harness/harness.lock.json")
     base_version = baseline_lock.get("release")
