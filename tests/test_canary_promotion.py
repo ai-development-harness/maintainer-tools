@@ -117,6 +117,15 @@ class UpdateProtocolTest(unittest.TestCase):
             with self.assertRaisesRegex(promotion.PromotionError, "did not accept"):
                 promotion.update(Path("/ignored"), "v0.11.6")
 
+    def test_schema_check_exit_code_cannot_be_hidden_by_current_json(self) -> None:
+        output = subprocess.CompletedProcess(
+            args=["schema-check"], returncode=2, stdout='{"status":"CURRENT"}', stderr="error"
+        )
+        with patch.object(promotion.subprocess, "run", return_value=output):
+            with self.assertRaisesRegex(promotion.PromotionError, "exited 2"):
+                promotion.schema_gate(Path("/ignored"))
+
+
 
 class SafeGitPreservationTest(unittest.TestCase):
     def setUp(self) -> None:
