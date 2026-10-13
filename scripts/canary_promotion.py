@@ -250,6 +250,12 @@ def canonical_digest(project: Path) -> str:
         name = os.fsdecode(raw)
         path = project / name
         digest.update(raw + b"\0")
+        # Canonical no-op включает Git file modes и symlink target, не только bytes.
+        if path.is_symlink():
+            digest.update(b"mode:120000\0")
+        elif path.is_file():
+            mode = b"100755" if path.stat().st_mode & stat.S_IXUSR else b"100644"
+            digest.update(b"mode:" + mode + b"\0")
         if path.is_symlink():
             digest.update(b"symlink\0" + os.fsencode(os.readlink(path)))
         elif path.is_file():
