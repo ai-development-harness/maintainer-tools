@@ -183,6 +183,13 @@ class SafeGitPreservationTest(unittest.TestCase):
         self.write(".harness/tools/check.py", "print('new')\n")
         self.assertNotEqual(first, promotion.canonical_digest(self.project))
 
+    def test_canonical_digest_detects_mode_only_mutation(self) -> None:
+        import os
+        path = self.project / ".harness/tools/check.py"
+        first = promotion.canonical_digest(self.project)
+        os.chmod(path, 0o755)
+        self.assertNotEqual(first, promotion.canonical_digest(self.project))
+
     def test_direct_graph_edge_required(self) -> None:
         self.write(".harness/harness-update-graph.json", json.dumps({
             "transitions": [{"from": "v0.11.5", "to": "v0.11.6"}]
