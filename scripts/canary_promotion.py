@@ -292,7 +292,10 @@ def schema_gate(project: Path) -> str:
             project,
             timeout=240,
         )
+        # После реальной migration повторная --check обязана вернуть exit=0.
         data = command_json(cmd, project, timeout=180)
+    elif proc.returncode != 0:
+        raise PromotionError(f"project schema --check exited {proc.returncode}: {data}")
     if data.get("status") != "CURRENT":
         raise PromotionError(f"project schema not CURRENT: {data}")
     return "CURRENT"
