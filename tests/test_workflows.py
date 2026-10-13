@@ -191,6 +191,8 @@ class ReleaseWorkflowTest(unittest.TestCase):
         ):
             self.assertIn(phrase, self.promotion)
         self.assertIn('steps.guard.outputs.skip != \'true\'', self.promotion)
+        self.assertIn("--head \"$BRANCH\" --base main", self.promotion)
+        self.assertIn("manual recovery required", self.promotion)
 
 
 if __name__ == "__main__":
