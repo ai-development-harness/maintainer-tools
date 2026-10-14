@@ -10,6 +10,7 @@ PREPARE = ROOT / ".github" / "workflows" / "prepare-release.yml"
 PUBLISH = ROOT / ".github" / "workflows" / "publish-release.yml"
 QUALIFICATION = ROOT / ".github" / "workflows" / "release-qualification.yml"
 CONFIG = ROOT / "config" / "release.json"
+PROMOTION = ROOT / ".github" / "workflows" / "promote-canary.yml"
 
 
 def input_block(text: str, name: str) -> str:
@@ -28,6 +29,7 @@ class ReleaseWorkflowTest(unittest.TestCase):
         self.publish = PUBLISH.read_text(encoding="utf-8")
         self.qualification = QUALIFICATION.read_text(encoding="utf-8")
         self.config = json.loads(CONFIG.read_text(encoding="utf-8"))
+        self.promotion = PROMOTION.read_text(encoding="utf-8")
 
     def test_harness_branch_is_required_and_has_no_default(self) -> None:
         for text in (self.prepare, self.publish):
@@ -144,6 +146,53 @@ class ReleaseWorkflowTest(unittest.TestCase):
         )
         for item in forbidden:
             self.assertNotIn(item, self.qualification)
+
+
+    def test_promotion_is_automatic_recoverable_and_separate_from_publish(self) -> None:
+        self.assertIn('workflows: ["Publish Harness Release"]', self.promotion)
+        self.assertIn("types: [completed]", self.promotion)
+        self.assertIn("github.event.workflow_run.conclusion == 'success'", self.promotion)
+        self.assertIn("schedule:", self.promotion)
+        self.assertIn('cron: "17 * * * *"', self.promotion)
+        self.assertIn("workflow_dispatch:", self.promotion)
+        self.assertIn("cancel-in-progress: false", self.promotion)
+        self.assertIn("release-canary-stable-promotion", self.promotion)
+        self.assertNotIn("promote-canary.yml", self.publish)
+
+    def test_promotion_uses_scoped_app_and_never_merges_automatically(self) -> None:
+        self.assertIn("repositories: release-canary", self.promotion)
+        self.assertIn("permission-contents: write", self.promotion)
+        self.assertIn("permission-pull-requests: write", self.promotion)
+        self.assertIn("permission-workflows: write", self.promotion)
+        self.assertIn("persist-credentials: false", self.promotion)
+        self.assertLess(
+            self.promotion.index("Verify promotion in disposable working tree"),
+            self.promotion.index("gh auth setup-git"),
+        )
+        self.assertIn("gh pr create", self.promotion)
+        self.assertIn("--base main", self.promotion)
+        self.assertNotIn("gh pr merge", self.promotion)
+        self.assertNotIn("enable_auto_merge", self.promotion)
+        self.assertNotIn("git push origin main", self.promotion)
+        self.assertNotIn("--force", self.promotion)
+
+    def test_promotion_checks_exact_release_and_canary_baseline(self) -> None:
+        for phrase in (
+            "scripts/canary_promotion.py select",
+            "scripts/canary_promotion.py promote",
+            "releases/tags/",
+            "refs/tags/",
+            "merge-base --is-ancestor",
+            "refs/heads/main",
+            "REMOTE_MAIN",
+            "GITHUB_OUTPUT",
+            "diff --cached --check",
+            "git -C canary add -A",
+        ):
+            self.assertIn(phrase, self.promotion)
+        self.assertIn('steps.guard.outputs.skip != \'true\'', self.promotion)
+        self.assertIn("--head \"$BRANCH\" --base main", self.promotion)
+        self.assertIn("manual recovery required", self.promotion)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,256 @@
+name: Promote Published Harness Canary
+
+on:
+  # После успешной публикации запускается отдельный workflow; Publish не блокируется.
+  workflow_run:
+    workflows: ["Publish Harness Release"]
+    types: [completed]
+    branches: [main]
+  # Резерв: пропущенные релизы и последовательные повышения через review/merge.
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-canary-stable-promotion
+  cancel-in-progress: false
+
+env:
+  TARGET_REPOSITORY: ai-development-harness/ai-development-harness-template
+  CANARY_REPOSITORY: ai-development-harness/release-canary
+
+jobs:
+  promote:
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'workflow_dispatch' &&
+       github.event.workflow_run.head_branch == 'main')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+
+    steps:
+      - name: Checkout trusted maintainer automation
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Select next published stable release
+        id: select
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Только публичные READ-запросы; App token пока не нужен.
+          gh api "repos/${CANARY_REPOSITORY}/contents/.harness/harness.lock.json?ref=main" \
+            --jq .content | base64 --decode > "$RUNNER_TEMP/canary-lock.json"
+          gh api --paginate --slurp \
+            "repos/${TARGET_REPOSITORY}/releases?per_page=100" \
+            > "$RUNNER_TEMP/stable-releases.json"
+          python scripts/canary_promotion.py select \
+            --lock "$RUNNER_TEMP/canary-lock.json" \
+            --releases "$RUNNER_TEMP/stable-releases.json" \
+            --source-repository "$TARGET_REPOSITORY" \
+            > "$RUNNER_TEMP/canary-selection.json"
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          data = json.loads(
+              (Path(os.environ["RUNNER_TEMP"]) / "canary-selection.json").read_text()
+          )
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              if data["status"] == "NO_UPDATE":
+                  print("Canary already current: " + data["current"])
+                  out.write("update=false\n")
+              else:
+                  print(f"Promote {data['current']} -> {data['target']}")
+                  out.write("update=true\n")
+                  out.write(f"previous={data['current']}\n")
+                  out.write(f"tag={data['target']}\n")
+          PY
+
+      - name: Resolve exact accepted canary commit
+        if: steps.select.outputs.update == 'true'
+        id: baseline
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          SHA="$(gh api "repos/${CANARY_REPOSITORY}/branches/main" --jq .commit.sha)"
+          [[ "$SHA" =~ ^[0-9a-f]{40}$ ]]
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Create canary-only Release Bot token
+        if: steps.select.outputs.update == 'true'
+        id: canary-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.HARNESS_RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.HARNESS_RELEASE_APP_PRIVATE_KEY }}
+          owner: ai-development-harness
+          repositories: release-canary
+          permission-contents: write
+          permission-pull-requests: write
+          # Требуется для .github/workflows/**, которую может менять Harness update.
+          permission-workflows: write
+
+      - name: Checkout exact published Harness tag
+        if: steps.select.outputs.update == 'true'
+        uses: actions/checkout@v7
+        with:
+          repository: ai-development-harness/ai-development-harness-template
+          ref: ${{ steps.select.outputs.tag }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: source
+
+      - name: Checkout exact canary baseline
+        if: steps.select.outputs.update == 'true'
+        uses: actions/checkout@v7
+        with:
+          repository: ai-development-harness/release-canary
+          ref: ${{ steps.baseline.outputs.sha }}
+          token: ${{ steps.canary-token.outputs.token }}
+          fetch-depth: 0
+          # Не оставляем write-credentials в рабочем дереве на время тестов.
+          persist-credentials: false
+          path: canary
+
+      - name: Verify immutable target and branch ownership
+        if: steps.select.outputs.update == 'true'
+        id: guard
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.select.outputs.tag }}
+          BASELINE_SHA: ${{ steps.baseline.outputs.sha }}
+        run: |
+          set -euo pipefail
+          git -C source fetch --quiet --no-tags origin \
+            "+refs/heads/main:refs/remotes/origin/main"
+          TARGET_SHA="$(git -C source rev-parse --verify "refs/tags/${TAG}^{commit}")"
+          [[ "$(git -C source rev-parse HEAD)" == "$TARGET_SHA" ]]
+          git -C source merge-base --is-ancestor "$TARGET_SHA" refs/remotes/origin/main
+          gh api "repos/${TARGET_REPOSITORY}/releases/tags/${TAG}" \
+            --jq 'select(.draft == false and .prerelease == false and .published_at != null) | .tag_name' \
+            | grep -Fx -- "$TAG"
+
+          BRANCH="promotion/${TAG}"
+          REMOTE_MAIN="$(git -C canary ls-remote origin refs/heads/main | awk '{print $1}')"
+          [[ "$REMOTE_MAIN" == "$BASELINE_SHA" ]] || {
+            echo "Canary main moved during selection; rerun with a fresh baseline." >&2
+            exit 1
+          }
+          # Не перезаписываем существующую ветку. Но orphan branch без PR —
+          # это частичный сбой прошлой попытки, не успешная идемпотентность.
+          if git -C canary ls-remote --exit-code --heads origin "refs/heads/${BRANCH}" >/dev/null 2>&1; then
+            OPEN_PRS="$(gh pr list --repo "$CANARY_REPOSITORY" --state open \
+              --head "$BRANCH" --base main --json number --jq 'length')"
+            if [[ "$OPEN_PRS" != "1" ]]; then
+              echo "Promotion branch ${BRANCH} exists without exactly one open PR; manual recovery required." >&2
+              exit 1
+            fi
+            echo "::notice::Existing promotion PR for ${BRANCH}; no duplicate."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "target_sha=$TARGET_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Verify promotion in disposable working tree
+        if: steps.select.outputs.update == 'true' && steps.guard.outputs.skip != 'true'
+        shell: bash
+        env:
+          TAG: ${{ steps.select.outputs.tag }}
+          TARGET_SHA: ${{ steps.guard.outputs.target_sha }}
+          BASELINE_SHA: ${{ steps.baseline.outputs.sha }}
+          PROMOTION_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          git -C canary switch -c "promotion/${TAG}"
+          python scripts/canary_promotion.py promote \
+            --project canary \
+            --source source \
+            --baseline-sha "$BASELINE_SHA" \
+            --target-tag "$TAG" \
+            --target-sha "$TARGET_SHA" \
+            --source-repository "$TARGET_REPOSITORY" \
+            --run-url "$PROMOTION_RUN_URL" \
+            | tee "$RUNNER_TEMP/canary-promotion-result.json"
+          git -C canary add -A
+          git -C canary diff --cached --check
+          if git -C canary diff --cached --quiet; then
+            echo "Updater produced no promotion changes." >&2
+            exit 1
+          fi
+
+      - name: Commit and open canary promotion PR
+        if: steps.select.outputs.update == 'true' && steps.guard.outputs.skip != 'true'
+        shell: bash
+        env:
+          TAG: ${{ steps.select.outputs.tag }}
+          TARGET_SHA: ${{ steps.guard.outputs.target_sha }}
+          BASELINE_SHA: ${{ steps.baseline.outputs.sha }}
+          GH_TOKEN: ${{ steps.canary-token.outputs.token }}
+          APP_SLUG: ${{ steps.canary-token.outputs.app-slug }}
+          PROMOTION_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          # Токен для push доступен только после всех локальных gates.
+          gh auth setup-git
+          BOT_ID="$(gh api "/users/${APP_SLUG}[bot]" --jq .id)"
+          git -C canary config user.name "${APP_SLUG}[bot]"
+          git -C canary config user.email "${BOT_ID}+${APP_SLUG}[bot]@users.noreply.github.com"
+          REMOTE_MAIN="$(git -C canary ls-remote origin refs/heads/main | awk '{print $1}')"
+          [[ "$REMOTE_MAIN" == "$BASELINE_SHA" ]] || {
+            echo "Canary main changed during verification; refusing stale PR." >&2
+            exit 1
+          }
+          git -C canary commit -m "chore(canary): promote accepted stable baseline to ${TAG}"
+          git -C canary push origin "HEAD:refs/heads/promotion/${TAG}"
+
+          cat > "$RUNNER_TEMP/canary-pr.md" <<EOF
+          ## Что было → Что стало
+
+          | Было | Стало |
+          | --- | --- |
+          | Принятая canary-база \`${{ steps.select.outputs.previous }}\` | Штатным updater установлен опубликованный \`${TAG}\` |
+          | Следующий release candidate не имеет previous-stable canary | После принятия PR canary станет базой для следующей Release Qualification |
+          | Ручная процедура на каждый релиз | Повторяемое продвижение с exact refs, сохранностью project-owned файлов и evidence |
+
+          ## Проверки
+
+          - Baseline SHA: \`${BASELINE_SHA}\`
+          - Published Harness SHA: \`${TARGET_SHA}\`
+          - [Promotion execution](${PROMOTION_RUN_URL})
+          - [Durable evidence](https://github.com/${CANARY_REPOSITORY}/blob/promotion/${TAG}/docs/baseline-promotions/${TAG}.md)
+          - Updater / reload / schema / STATUS / DOCTOR / validator / full self-tests / project-owned preservation / NO_UPDATE: PASS.
+
+          ## Правила пользователя
+
+          | Правило | Требуется |
+          | --- | --- |
+          | Проверить три обязательных Harness Integrity jobs до merge | Да |
+          | Проверить diff и принять stable baseline | Да |
+          | Запускать ручной promotion workflow для каждого релиза | Больше не требуется |
+
+          **PR не сливается автоматически.** Только после независимого CI и review.
+          EOF
+          gh pr create \
+            --repo "$CANARY_REPOSITORY" \
+            --base main \
+            --head "promotion/${TAG}" \
+            --title "chore(canary): promote accepted stable baseline to ${TAG}" \
+            --body-file "$RUNNER_TEMP/canary-pr.md"
