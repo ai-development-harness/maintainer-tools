@@ -97,7 +97,7 @@ Prepare автоматически вызывает этот workflow для pre
 - `Validate Python 3.11 compatibility` от GitHub Actions;
 - `Validate Windows boundaries` от GitHub Actions.
 
-Missing, in-progress, failed, созданный другой App или check для другого SHA блокирует tag/Release. Только после этого повторно проверяются metadata/local validator и выполняется публикация.
+После проверки metadata/local validator hard gate опрашивает Check Runs каждые 15 секунд и ждёт до 15 минут: отсутствующие или ещё выполняющиеся обязательные проверки (`queued / in_progress / waiting / pending / requested`) удерживают публикацию в ожидании. Каждый опрос заново выбирает последний Check Run на exact merge SHA, поэтому старый PASS не перекрывает новый запуск. Неуспешно завершённая проверка, неизвестное состояние или другой App немедленно блокируют tag/Release. Ошибка чтения GitHub API также останавливает публикацию; Check Run другого SHA не засчитывается. При исчерпании времени выводится `RELEASE GATES: TIMEOUT`, tag/Release не создаются. Внешний `timeout-minutes: 16` ограничивает сам шаг ожидания.
 
 Tag привязывается **не к текущему HEAD выбранной Harness-ветки**, а к merge commit release PR. Поэтому изменения, случайно влитые после подготовки релиза, не попадут в уже подготовленный release.
 
@@ -337,7 +337,7 @@ Workflow найдёт merge commit release PR именно в указанной
 - Нет merged release PR в выбранной Harness branch → publish блокируется.
 - Merge commit release PR больше не достижим из выбранной Harness branch → publish блокируется.
 - Exact merge SHA не прошёл свежую `Harness Release Qualification` → tag/Release не создаются.
-- Последний обязательный Integrity Check Run на exact merge SHA отсутствует, pending или failed → tag/Release не создаются.
+- Последний обязательный Check Run на exact merge SHA отсутствует или ещё выполняется → ожидание до 15 минут, затем timeout без tag/Release; завершился неуспешно → немедленная блокировка.
 - Check с ожидаемым именем создан не ожидаемым GitHub App → gate считает его недействительным.
 - Metadata не соответствует requested version → publish блокируется до создания tag.
 - Tag существует на другом commit → tag не перемещается.

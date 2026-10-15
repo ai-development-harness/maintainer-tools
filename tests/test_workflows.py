@@ -85,7 +85,12 @@ class ReleaseWorkflowTest(unittest.TestCase):
     def test_publish_requires_exact_sha_check_runs(self) -> None:
         self.assertIn("permission-checks: read", self.publish)
         self.assertIn("scripts/release_gates.py", self.publish)
-        self.assertIn("check-runs?per_page=100", self.publish)
+        self.assertIn('--repository "$TARGET_REPOSITORY"', self.publish)
+        self.assertIn("--timeout-seconds 900", self.publish)
+        self.assertIn("--poll-interval-seconds 15", self.publish)
+        gate = self.publish.split("- name: Verify exact-SHA qualification and Harness Integrity checks", 1)[1]
+        gate = gate.split("- name: Create or verify release tag", 1)[0]
+        self.assertIn("timeout-minutes: 16", gate)
         self.assertIn("QUALIFICATION_APP_SLUG", self.publish)
         self.assertIn("MERGE_SHA: ${{ needs.resolve.outputs.merge_sha }}", self.publish)
 
