@@ -310,6 +310,9 @@ jobs:
         run: python3 "${{ steps.layout.outputs.validator_path }}" --mode ci
 
       - name: Verify exact-SHA qualification and Harness Integrity checks
+        # Integrity может ещё выполняться после qualification. Даём ему 15 минут,
+        # а внешний timeout страхует зависание самого процесса ожидания.
+        timeout-minutes: 16
         shell: bash
         env:
           TARGET_REPOSITORY: ${{ steps.config.outputs.target_repository }}
@@ -319,15 +322,12 @@ jobs:
         run: |
           set -euo pipefail
 
-          gh api \
-            -H "Accept: application/vnd.github+json" \
-            "repos/$TARGET_REPOSITORY/commits/$MERGE_SHA/check-runs?per_page=100" \
-            > /tmp/release-check-runs.json
-
           python scripts/release_gates.py \
-            --checks-json /tmp/release-check-runs.json \
+            --repository "$TARGET_REPOSITORY" \
             --sha "$MERGE_SHA" \
-            --qualification-app-slug "$QUALIFICATION_APP_SLUG"
+            --qualification-app-slug "$QUALIFICATION_APP_SLUG" \
+            --timeout-seconds 900 \
+            --poll-interval-seconds 15
 
       - name: Create or verify release tag
         shell: bash
