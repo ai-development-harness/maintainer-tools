@@ -391,6 +391,15 @@ python -m py_compile scripts/release.py
 
 То же выполняет `.github/workflows/ci.yml`.
 
+Постоянные regression-тесты `tests/test_prepare_negative.py` запускают production
+`release_completion.py` через настоящий subprocess и изолированный `gh` fixture.
+Старая база и отсутствие merged promotion PR обязаны вернуть `BLOCKED` / exit 1
+до всех маркеров последующих mutations; актуальная база служит положительным
+контролем. Команда извлекается из Prepare, а тест проверяет её порядок перед
+write token / metadata / release branch / PR и отсутствие обходов failure.
+Шаг CI **Verify Prepare negative scenarios** выполняется на каждом PR и push в main;
+реальные GitHub mutations тестами не выполняются.
+
 ## Структура
 
 ```text
