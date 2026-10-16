@@ -104,6 +104,13 @@ jobs:
               print(f"branch_prefix={config['releaseBranchPrefix']}", file=out)
           PY
 
+      # Следующий candidate нельзя готовить, пока предыдущий stable не принят в canary.
+      - name: Require completed stable canary promotion
+        timeout-minutes: 5
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/release_completion.py
+
       - name: Create scoped GitHub App token
         id: app-token
         uses: actions/create-github-app-token@v3
@@ -317,6 +324,7 @@ jobs:
 
           Перед merge проверь отдельный Check **Harness Release Qualification** на candidate commit.
           После review и squash merge этого PR запусти workflow **Publish Harness Release** с теми же version и Harness branch.
+          Выпуск завершается только после review/merge promotion PR в canary и \`COMPLETE\` от \`python scripts/release_completion.py --version ${VERSION}\`.
           EOF
 
           gh pr create \

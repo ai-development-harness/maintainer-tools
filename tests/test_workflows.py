@@ -38,6 +38,32 @@ class ReleaseWorkflowTest(unittest.TestCase):
             self.assertIn("type: string", block)
             self.assertNotIn("default:", block)
 
+    def test_prepare_blocks_before_mutations_without_completed_promotion(self) -> None:
+        gate = self.prepare.index("run: python scripts/release_completion.py")
+        self.assertLess(gate, self.prepare.index("Create scoped GitHub App token"))
+        self.assertLess(gate, self.prepare.index("Prepare metadata"))
+        block = self.prepare.split("- name: Require completed stable canary promotion", 1)[1].split("- name:", 1)[0]
+        self.assertNotIn("if:", block)
+        self.assertNotIn("continue-on-error", block)
+        self.assertNotIn("--version", block)
+
+    def test_release_pr_prose_cannot_execute_backtick_commands(self) -> None:
+        # Тело PR раскрывает VERSION через heredoc, поэтому Markdown backticks
+        # должны остаться текстом и не превратиться в shell command substitution.
+        body = self.prepare.split("cat > /tmp/release-pr.md <<EOF", 1)[1].split("\n          EOF", 1)[0]
+        self.assertIsNone(re.search(r"(?<!\\)`", body))
+
+    def test_release_completion_runs_after_promotion_even_on_failure(self) -> None:
+        workflow = (ROOT / ".github/workflows/release-completion.yml").read_text()
+        self.assertIn('workflows: ["Promote Published Harness Canary"]', workflow)
+        self.assertIn("workflow_dispatch:", workflow)
+        self.assertIn("python scripts/release_completion.py", workflow)
+        self.assertIn("set -euo pipefail", workflow)
+        self.assertNotIn("conclusion == 'success'", workflow)
+        self.assertNotIn("continue-on-error", workflow)
+        self.assertNotIn("gh pr merge", workflow)
+        self.assertNotIn("contents: write", workflow)
+
     def test_no_hidden_default_harness_branch_remains(self) -> None:
         self.assertNotIn("defaultBranch", self.config)
         for text in (self.prepare, self.publish):

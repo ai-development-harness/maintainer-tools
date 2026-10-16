@@ -31,6 +31,18 @@
               │
               ▼
        tag vX.Y.Z + GitHub Release
+              │
+              ▼
+      promotion/vX.Y.Z + canary PR
+              │
+      независимый CI / review / merge
+              │
+              ▼
+ Verify Harness Release Completion
+  canary/main: version + exact source SHA
+              │
+              ▼
+       выпуск завершён (COMPLETE)
 ```
 
 ### Prepare Harness Release
@@ -53,6 +65,8 @@
 9. экспортирует exact candidate SHA и автоматически вызывает reusable `Harness Release Qualification` для этого commit.
 
 Tag и GitHub Release здесь **не создаются**. Qualification также не создаёт tag/release и не изменяет release metadata.
+
+До получения write token и изменения metadata Prepare обязательно запускает `scripts/release_completion.py`: последний опубликованный stable уже должен быть принят в `release-canary/main` через merged promotion PR. Неактуальная база, открытый/закрытый без merge PR, ошибка API или несовпадение source SHA блокируют Prepare до создания нового candidate.
 
 Важно: release snapshot намеренно **не содержит** `lock.source.commit`. SHA самого release commit невозможно знать до создания этого commit, поэтому self-pin в snapshot был бы либо устаревшим, либо вымышленным. После установки/обновления проекта deterministic updater уже разрешает immutable tag и записывает его точный OID в project lock.
 
@@ -131,6 +145,25 @@ Workflow не изменяет `release-canary/main` напрямую. Если 
 PR, созданный через GitHub App token, автоматически запускает `pull_request` CI (в отличие от обычного `GITHUB_TOKEN`, для которого могут требоваться отдельные approvals). Автоматизация **никогда не использует auto-merge**.
 
 **Операционная поддержка:** workflow — [Promote Published Harness Canary](https://github.com/ai-development-harness/maintainer-tools/actions/workflows/promote-canary.yml). Для разового повтора запусти `Run workflow` в `maintainer-tools/main`: он выбирает ближайший непринятый stable. Если PR уже открыт, дождись CI и заверши review/merge; новый запуск ничего не перезапишет. После успешного merge будет доступно продвижение следующего опубликованного релиза (по расписанию или вручную).
+
+### Обязательное завершение выпуска
+
+Успешный Publish означает, что релиз опубликован. **Выпуск завершён только после принятия этой версии в canary.** Maintainer или агент, выполняющий запрос на выпуск, обязан в рамках того же запроса дождаться promotion PR, проверить diff и три обязательных CI jobs, выполнить review/merge и проверить удалённую базу. Отдельное напоминание пользователя для этого этапа не требуется.
+
+```bash
+python3 scripts/release_completion.py --version vX.Y.Z
+```
+
+Gate выполняет только read-only GitHub API запросы и возвращает `COMPLETE` лишь при одновременном выполнении условий:
+
+- версия опубликована как stable GitHub Release, tag разрешён в точный commit;
+- manifest и lock из одного exact SHA `release-canary/main` содержат эту версию, правильный source repository/ref и commit опубликованного tag;
+- существует единственный merged PR `promotion/vX.Y.Z → main` из самого canary; его merge commit входит в историю проверенного `main`;
+- `main` не изменился во время проверки.
+
+Результат включает release, source SHA, canary SHA, promotion PR URL и merge SHA. `BLOCKED` с ненулевым exit code означает незавершённый выпуск. Созданный PR, зелёный promotion workflow или совпадение локальной версии не заменяют этот gate. Если продолжить нельзя, итоговый отчёт обязан назвать blocker и незавершённый promotion; уже опубликованный tag/Release не откатывается.
+
+`.github/workflows/release-completion.yml` (**Verify Harness Release Completion**) запускает gate после каждого завершения promotion workflow, включая неуспешное, и доступен вручную. Пока PR открыт, ожидается `BLOCKED`; после merge выполните ручной запуск для немедленного подтверждения. Ежечасный promotion повторно запускает проверку автоматически. Evidence сохраняется в Actions summary. Без `--version` проверяется последний stable по SemVer; появление нового stable во время проверки требует повторного запуска. Этот же режим является обязательным preflight следующего Prepare, без обхода для выбранной source branch.
 
 **Regression:** `python -m unittest discover -s tests -v` включает select/no-op, несколько пропущенных releases, запрет prerelease и mismatched refs, reload/idempotence, preservation project-owned и direct transition. Доступ к GitHub App/срабатывание удалённого workflow проверяется отдельно уже после установки App; локальные unit-тесты не подтверждают права GitHub.
 
@@ -326,6 +359,10 @@ title:          v0.2.7 — Release title
 
 Workflow найдёт merge commit release PR именно в указанной `harness_branch` и только после повторной проверки создаст tag + Release. Для Publish указывай **ту же ветку**, которая использовалась при Prepare.
 
+**4. Принять canary и завершить выпуск**
+
+Дождись автоматического promotion PR в `release-canary`, проверь diff и три Harness Integrity checks, выполни review/merge. Запусти `python3 scripts/release_completion.py --version v0.2.7` и сохрани `COMPLETE` с PR URL и exact SHA в итоговом отчёте. Для подтверждения в Actions запусти **Verify Harness Release Completion**. На этом этапе заканчивается исходный запрос на выпуск релиза.
+
 ## Failure policy
 
 - Harness branch не указана, невалидна или не существует → workflow блокируется; fallback на `main` отсутствует.
@@ -343,6 +380,7 @@ Workflow найдёт merge commit release PR именно в указанной
 - Tag существует на другом commit → tag не перемещается.
 - Release branch/tag/release уже существует при Prepare → overwrite не выполняется.
 - Текущий release-state неконсистентен → Prepare блокируется и требует recovery PR.
+- Последний stable не принят в canary через merged promotion PR или exact pin не совпадает → выпуск остаётся незавершённым, следующий Prepare блокируется.
 
 ## Проверки maintainer-tools
 
@@ -385,3 +423,5 @@ Publish Harness Release
 ```
 
 Candidate qualification не является разрешением переиспользовать PASS для другого SHA. При запуске Publish exact release merge SHA автоматически квалифицируется повторно; tag создаётся только после успешной qualification и successful Harness Integrity checks на том же SHA.
+
+После Publish обязательно заверши canary promotion и получи `COMPLETE` от release completion gate. Только после этого сообщай, что выпуск завершён, и готовь следующий релиз.
