@@ -25,3 +25,7 @@ jobs:
 
       - name: Run tests
         run: python -m unittest discover -s tests -v
+
+      # Отдельный видимый шаг сохраняет regression отказа Prepare в каждом CI run.
+      - name: Verify Prepare negative scenarios
+        run: python -m unittest discover -s tests -p test_prepare_negative.py -v
