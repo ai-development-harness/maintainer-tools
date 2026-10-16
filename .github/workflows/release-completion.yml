@@ -1,0 +1,41 @@
+name: Verify Harness Release Completion
+
+on:
+  # Promotion создаёт PR; его успешный workflow ещё не означает принятие базы.
+  # Ежечасный promotion повторно запускает gate и после merge или своего сбоя.
+  workflow_run:
+    workflows: ["Promote Published Harness Canary"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  completion:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout trusted maintainer automation
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - name: Verify merged promotion and accepted baseline
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/release_completion.py | tee "$RUNNER_TEMP/release-completion.json"
+      - name: Record completion evidence
+        if: always()
+        shell: bash
+        run: |
+          if [[ -f "$RUNNER_TEMP/release-completion.json" ]]; then
+            cat "$RUNNER_TEMP/release-completion.json" >> "$GITHUB_STEP_SUMMARY"
+          fi
