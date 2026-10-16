@@ -148,6 +148,9 @@ jobs:
           TMP="$(mktemp -d)"
           trap 'rm -rf "$TMP"' EXIT
           git -C "$TMP" init -q
+          # Fetch не должен оставлять фонового writer, конкурирующего с EXIT cleanup.
+          git -C "$TMP" config gc.auto 0
+          git -C "$TMP" config maintenance.auto false
           git -C "$TMP" remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${TARGET_REPOSITORY}.git"
           git -C "$TMP" fetch -q --no-tags origin "$TARGET_REF"
           REF_SHA="$(git -C "$TMP" rev-parse FETCH_HEAD)"
