@@ -29,3 +29,8 @@ jobs:
       # Отдельный видимый шаг сохраняет regression отказа Prepare в каждом CI run.
       - name: Verify Prepare negative scenarios
         run: python -m unittest discover -s tests -p test_prepare_negative.py -v
+
+      # Намеренно ломаем только временную копию и требуем ожидаемых падений тестов.
+      - name: Verify Prepare regression sensitivity
+        timeout-minutes: 2
+        run: python tests/run_prepare_mutations.py

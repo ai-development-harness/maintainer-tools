@@ -1,436 +1,273 @@
 # AI Development Harness — Maintainer Tools
 
-Служебный control plane для сопровождения **самого AI Development Harness**. Он отделён от [`ai-development-harness-template`](https://github.com/ai-development-harness/ai-development-harness-template), поэтому maintainer-only workflow не копируются в пользовательские проекты.
+Этот репозиторий содержит инструменты для выпуска **самого AI Development Harness**. Они работают в GitHub Actions и не устанавливаются в пользовательские проекты вместе с Harness.
 
-## Release flow
+**Выпуск заканчивается, когда релиз опубликован, а его версия принята в `release-canary/main`.** Одного опубликованного тега или открытого PR обновления canary недостаточно. Если предыдущий выпуск не завершён, подготовка следующего останавливается.
 
-Обычный merge PR в любую Harness-ветку **не выпускает релиз**. Релиз использует два ручных workflow и отдельную автоматическую Release Qualification между подготовкой candidate и публикацией:
+## Кто за что отвечает
+
+| Репозиторий | Назначение |
+| --- | --- |
+| [`maintainer-tools`](https://github.com/ai-development-harness/maintainer-tools) | Запускает подготовку, проверки, публикацию и обновление canary |
+| [`ai-development-harness-template`](https://github.com/ai-development-harness/ai-development-harness-template) | Хранит код Harness, релизные PR, теги и опубликованные версии |
+| [`release-canary`](https://github.com/ai-development-harness/release-canary) | Хранит пример уже настроенного проекта, на котором проверяется обновление Harness |
+
+Canary — это контрольный проект. Его ветка `main` содержит принятую стабильную версию. Следующий релиз проверяется на отдельной копии этого проекта, поэтому сами проверки не меняют принятую базу.
+
+Под *promotion PR* ниже понимается PR, который обновляет canary до уже опубликованного релиза. Ответственный за выпуск — человек или агент, которому поручен весь выпуск, — проверяет и сливает оба PR: релизный и canary.
+
+## Как связаны процессы
+
+Обычное слияние изменений в Harness не выпускает релиз. Подготовка и публикация запускаются отдельно; проверки между ними выполняются автоматически.
+
+```mermaid
+flowchart TD
+    Start["Изменения готовы в выбранной ветке Harness"] --> Prepare["Prepare Harness Release"]
+    Prepare --> Previous{"Предыдущий релиз принят в canary?"}
+    Previous -->|Нет| Stop["Остановка до создания ветки и PR"]
+    Previous -->|Да| ReleasePR["Релизный PR в Harness"]
+    ReleasePR --> Candidate["Проверка подготовленного commit"]
+    Candidate --> Review["Проверка изменений и слияние PR"]
+    Review --> Publish["Publish Harness Release"]
+    Publish --> Merged["Повторная проверка commit после слияния"]
+    Merged --> Published["Тег и GitHub Release"]
+    Published --> Promote["Promote Published Harness Canary"]
+    Promote --> CanaryPR["PR обновления canary"]
+    CanaryPR --> CanaryReview["Независимый CI, проверка изменений и слияние"]
+    CanaryReview --> Complete["Verify Harness Release Completion"]
+    Complete --> Done["COMPLETE: выпуск завершён"]
+```
+
+Стрелки через проверки означают переход только при успехе. Созданный promotion PR ещё не завершает выпуск: до его слияния проверка завершения возвращает `BLOCKED`.
+
+| Процесс в Actions | Когда запускается | Что делает |
+| --- | --- | --- |
+| [Prepare Harness Release](https://github.com/ai-development-harness/maintainer-tools/actions/workflows/prepare-release.yml) | Вручную | Проверяет предыдущий выпуск, подготавливает версию и открывает релизный PR |
+| [Harness Release Qualification](https://github.com/ai-development-harness/maintainer-tools/actions/workflows/release-qualification.yml) | Из Prepare и Publish; также доступен вручную | Проверяет конкретный commit Harness, включая обновление копии canary |
+| [Publish Harness Release](https://github.com/ai-development-harness/maintainer-tools/actions/workflows/publish-release.yml) | Вручную после слияния релизного PR | Повторно проверяет результат слияния и публикует его |
+| [Promote Published Harness Canary](https://github.com/ai-development-harness/maintainer-tools/actions/workflows/promote-canary.yml) | После успешного Publish, каждый час в минуту 17 UTC или вручную | Создаёт PR обновления контрольного проекта |
+| [Verify Harness Release Completion](https://github.com/ai-development-harness/maintainer-tools/actions/workflows/release-completion.yml) | После каждого завершения promotion, включая неуспешное, или вручную | Проверяет, что релиз принят в canary |
+
+Автоматические связи между workflow используют запуски из `maintainer-tools/main`. Ветка самого Harness задаётся отдельно в Prepare и Publish.
+
+## Как выпустить релиз
+
+Ниже `vX.Y.Z` — выбранная новая версия, а `main` — пример ветки Harness. Подставь реальные значения.
+
+### 1. Подготовить версию
+
+Запусти **Prepare Harness Release**:
 
 ```text
-изменения → выбранная ветка Harness
-             (main / maintenance / release line)
-              │
-              ▼
-      Prepare Harness Release
-              │
-              ▼
-       release/vX.Y.Z + PR
-              │
-              ▼
- Harness Release Qualification
-       exact candidate SHA
-              │
-       review / squash merge
-              │
-              ▼
- Harness Release Qualification
-        exact merge SHA
-              │
-              ▼
-      Publish Harness Release
-              │
-              ▼
-       tag vX.Y.Z + GitHub Release
-              │
-              ▼
-      promotion/vX.Y.Z + canary PR
-              │
-      независимый CI / review / merge
-              │
-              ▼
- Verify Harness Release Completion
-  canary/main: version + exact source SHA
-              │
-              ▼
-       выпуск завершён (COMPLETE)
-```
-
-### Prepare Harness Release
-
-`.github/workflows/prepare-release.yml`:
-
-1. требует явно указать source branch Harness; default branch намеренно отсутствует;
-2. проверяет, что выбранная ветка существует, checkout совпадает с её remote HEAD и текущие `manifest / lock / update graph` согласованы;
-3. проверяет отсутствие target tag, Release и release branch;
-4. через `scripts/release.py` детерминированно определяет единственный полный release layout и обновляет его:
-   - новый layout: `.harness/manifest.yaml`, `.harness/harness.lock.json`, `.harness/harness-update-graph.json`;
-   - legacy layout: `.project/manifest.yaml`, `.project/harness.lock.json`, `.project/harness-update-graph.json`;
-   - manifest → `harness.release`;
-   - lock → `release/source.ref`, при этом `source.commit` удаляется из release snapshot;
-   - update graph → `latest` и transition `current → target` с явно заданным `reloadRequired`;
-5. запускает validator из того же resolved layout;
-6. повторно проверяет, что source branch не сдвинулась во время подготовки;
-7. создаёт `release/vX.Y.Z`;
-8. открывает PR `chore: подготовить release vX.Y.Z` **в выбранную source branch**;
-9. экспортирует exact candidate SHA и автоматически вызывает reusable `Harness Release Qualification` для этого commit.
-
-Tag и GitHub Release здесь **не создаются**. Qualification также не создаёт tag/release и не изменяет release metadata.
-
-До получения write token и изменения metadata Prepare обязательно запускает `scripts/release_completion.py`: последний опубликованный stable уже должен быть принят в `release-canary/main` через merged promotion PR. Неактуальная база, открытый/закрытый без merge PR, ошибка API или несовпадение source SHA блокируют Prepare до создания нового candidate.
-
-Важно: release snapshot намеренно **не содержит** `lock.source.commit`. SHA самого release commit невозможно знать до создания этого commit, поэтому self-pin в snapshot был бы либо устаревшим, либо вымышленным. После установки/обновления проекта deterministic updater уже разрешает immutable tag и записывает его точный OID в project lock.
-
-### Harness Release Qualification
-
-`.github/workflows/release-qualification.yml` — reusable + manually dispatchable workflow для release-level проверки **exact Harness SHA**.
-
-Он:
-
-1. валидирует `target_repository / target_ref / target_sha` и доказывает, что exact SHA достижим из выбранной Harness branch;
-2. создаёт в Harness repository отдельный GitHub Check с устойчивым именем `Harness Release Qualification`, привязанный именно к `target_sha`;
-3. создаёт scoped App token только для target Harness repository;
-4. читает public `release-canary` без App credentials, разрешает exact SHA accepted canary `main` и использует его как immutable baseline конкретного run;
-5. запускает canonical core lanes:
-   - current Linux / Python 3.13;
-   - minimum Linux / Python 3.11;
-   - Windows / Python 3.13;
-6. запускает canonical initialized downstream upgrade runner на disposable canary baseline;
-7. сохраняет machine-readable evidence каждого lane как Actions artifact;
-8. через `always()` finalizer завершает exact-SHA Check как success только если **все** обязательные jobs завершились success.
-
-Workflow не копирует stress logic: bounded stress является частью canonical `release-qualification.py --lane current` в Harness core.
-
-Qualification использует **двухуровневую timeout-защиту**:
-
-- canonical core runner ограничивает отдельный gate и пишет machine-readable `TIMEOUT / timeoutSeconds / durationMs` evidence;
-- GitHub Actions job имеет независимый outer `timeout-minutes` на случай зависания самого runner или platform tooling.
-
-Outer budgets намеренно шире обычного inner gate budget: preflight/finalize — 5 минут, minimum — 15 минут, current/windows/downstream — 20 минут. Job-level timeout является last resort и не заменяет inner evidence.
-
-Если public canary недоступен, target SHA/ref не совпадают, lane падает, timeout срабатывает, evidence incomplete или finalizer не может обновить Check — qualification не считается успешной.
-
-Prepare автоматически вызывает этот workflow для prepared candidate SHA. Повторная qualification exact merge SHA перед Publish подключается отдельным publish hard gate и не подменяется candidate PASS.
-
-### Publish Harness Release
-
-`.github/workflows/publish-release.yml` запускается после merge release PR.
-
-Он требует снова явно указать Harness branch, находит **единственный merged** PR `release/vX.Y.Z` с этой base branch и разрешает его exact merge SHA. Исторические closed/unmerged candidates того же version/head/title игнорируются: это позволяет безопасно пересобирать release candidate после fail-closed qualification, не создавая ambiguity при Publish. Затем Publish **сам запускает Release Qualification для exact merge SHA** и не переиспользует candidate PASS. После успешной qualification отдельный hard gate читает Check Runs этого же SHA и требует последние успешные:
-- `Harness Release Qualification` от configured Release Bot App;
-- `Validate Harness` от GitHub Actions;
-- `Validate Python 3.11 compatibility` от GitHub Actions;
-- `Validate Windows boundaries` от GitHub Actions.
-
-После проверки metadata/local validator hard gate опрашивает Check Runs каждые 15 секунд и ждёт до 15 минут: отсутствующие или ещё выполняющиеся обязательные проверки (`queued / in_progress / waiting / pending / requested`) удерживают публикацию в ожидании. Каждый опрос заново выбирает последний Check Run на exact merge SHA, поэтому старый PASS не перекрывает новый запуск. Неуспешно завершённая проверка, неизвестное состояние или другой App немедленно блокируют tag/Release. Ошибка чтения GitHub API также останавливает публикацию; Check Run другого SHA не засчитывается. При исчерпании времени выводится `RELEASE GATES: TIMEOUT`, tag/Release не создаются. Внешний `timeout-minutes: 16` ограничивает сам шаг ожидания.
-
-Tag привязывается **не к текущему HEAD выбранной Harness-ветки**, а к merge commit release PR. Поэтому изменения, случайно влитые после подготовки релиза, не попадут в уже подготовленный release.
-
-Publish идемпотентен для частичного сбоя: существующий tag допустим только если уже указывает на ожидаемый commit; существующий Release допустим только с ожидаемым названием.
-
-
-### Automatic release-canary promotion
-
-`.github/workflows/promote-canary.yml` создаёт **отдельный PR** с обновлением принятого canary baseline **после успешного Publish Harness Release**. Публикация и продвижение независимы: ошибка promotion не отменяет уже опубликованный tag или GitHub Release.
-
-Триггеры: `workflow_run` (только успешный `Publish Harness Release` из `main`), `schedule` каждый час в минуту 17 UTC (резерв для ранее опубликованных/пропущенных релизов) и ручной `workflow_dispatch` без обязательных параметров. Schedule выполняет повторную сверку; если canary уже соответствует последнему стабильному релизу, изменений нет.
-
-**Алгоритм:**
-
-1. Прочитать exact `release-canary/main` и version/source commit из canary lock; найти **ближайший следующий** опубликованный стабильный Harness Release по SemVer. Draft и prerelease не подходят. При нескольких пропущенных версиях нельзя перепрыгивать через промежуточную: сначала review/merge PR первого релиза.
-2. Разрешить immutable target tag/SHA, удостовериться, что commit достижим из Harness `main` и граф содержит **прямой** переход из установленной stable; отклонить другие ветки/неполную identity. При существующей `promotion/vX.Y.Z` не перезаписывать её и не создавать дубликат PR.
-3. Создать отдельный checkout точного baseline, зафиксировать Git blob SHA/mode project-owned файлов. Вызвать **настоящий** `harness-update.py apply --to vX.Y.Z` и при reload boundary продолжить в новом Python-процессе. Запрещено переписывать manifest/lock вручную ради успешного теста.
-4. Проверить project schema (`PROJECT RECONCILE` при необходимости), `HARNESS STATUS`, `HARNESS DOCTOR`, validator, весь `run-self-tests.py`, сохранность исходных project-owned файлов и запрет неожиданных project additions. Затем повторить APPLY и доказать `NO_UPDATE` и отсутствие canonical mutation.
-5. Записать `docs/baseline-promotions/vX.Y.Z.md` в canary, создать `promotion/vX.Y.Z` и PR в `release-canary/main` под отдельным GitHub App installation token, ограниченным **только canary**. Токен для push не доступен командам обновления и self-tests.
-6. **Не сливать PR автоматически.** Независимый `Harness Integrity` по PR проверяет `Validate Harness`, `Validate Python 3.11 compatibility`, `Validate Windows boundaries`. После проверки diff и успешного CI maintainer вручную сливает PR; только затем новый baseline считается принятым.
-
-Workflow не изменяет `release-canary/main` напрямую. Если target/branch/review/validator/update конфликтуют, он останавливается, не публикует неподтверждённую версию и оставляет диагностику Actions.
-
-**Одноразовая настройка GitHub App** — обязательна для автономного создания PR:
-
-- Открой GitHub App **AI Harness Release Bot** организации и добавь `release-canary` в её установку (раньше она была установлена только на `ai-development-harness-template`).
-- В `Permissions & events` добавь repository permission **Workflows: Read & write**, оставь **Contents: Read & write** и **Pull requests: Read & write**. Подтверди изменение permissions/installation. Workflows write необходим, потому что штатный Harness updater может менять `.github/workflows/harness-integrity.yml`; обычный `GITHUB_TOKEN` не годится для этой операции.
-- Переменная `HARNESS_RELEASE_APP_CLIENT_ID` и секрет `HARNESS_RELEASE_APP_PRIVATE_KEY` уже используются в `maintainer-tools`; дополнительных секретов автоматизация не требует. Из workflow запрашивается токен с разрешениями `contents: write`, `pull-requests: write`, `workflows: write` **только** для `release-canary`.
-- Настрой в `release-canary` branch protection/ruleset для `main` с required checks **Validate Harness**, **Validate Python 3.11 compatibility**, **Validate Windows boundaries** и review перед merge. Само создание PR не делает CI обязательным правилом ветки.
-
-PR, созданный через GitHub App token, автоматически запускает `pull_request` CI (в отличие от обычного `GITHUB_TOKEN`, для которого могут требоваться отдельные approvals). Автоматизация **никогда не использует auto-merge**.
-
-**Операционная поддержка:** workflow — [Promote Published Harness Canary](https://github.com/ai-development-harness/maintainer-tools/actions/workflows/promote-canary.yml). Для разового повтора запусти `Run workflow` в `maintainer-tools/main`: он выбирает ближайший непринятый stable. Если PR уже открыт, дождись CI и заверши review/merge; новый запуск ничего не перезапишет. После успешного merge будет доступно продвижение следующего опубликованного релиза (по расписанию или вручную).
-
-### Обязательное завершение выпуска
-
-Успешный Publish означает, что релиз опубликован. **Выпуск завершён только после принятия этой версии в canary.** Maintainer или агент, выполняющий запрос на выпуск, обязан в рамках того же запроса дождаться promotion PR, проверить diff и три обязательных CI jobs, выполнить review/merge и проверить удалённую базу. Отдельное напоминание пользователя для этого этапа не требуется.
-
-```bash
-python3 scripts/release_completion.py --version vX.Y.Z
-```
-
-Gate выполняет только read-only GitHub API запросы и возвращает `COMPLETE` лишь при одновременном выполнении условий:
-
-- версия опубликована как stable GitHub Release, tag разрешён в точный commit;
-- manifest и lock из одного exact SHA `release-canary/main` содержат эту версию, правильный source repository/ref и commit опубликованного tag;
-- существует единственный merged PR `promotion/vX.Y.Z → main` из самого canary; его merge commit входит в историю проверенного `main`;
-- `main` не изменился во время проверки.
-
-Результат включает release, source SHA, canary SHA, promotion PR URL и merge SHA. `BLOCKED` с ненулевым exit code означает незавершённый выпуск. Созданный PR, зелёный promotion workflow или совпадение локальной версии не заменяют этот gate. Если продолжить нельзя, итоговый отчёт обязан назвать blocker и незавершённый promotion; уже опубликованный tag/Release не откатывается.
-
-`.github/workflows/release-completion.yml` (**Verify Harness Release Completion**) запускает gate после каждого завершения promotion workflow, включая неуспешное, и доступен вручную. Пока PR открыт, ожидается `BLOCKED`; после merge выполните ручной запуск для немедленного подтверждения. Ежечасный promotion повторно запускает проверку автоматически. Evidence сохраняется в Actions summary. Без `--version` проверяется последний stable по SemVer; появление нового stable во время проверки требует повторного запуска. Этот же режим является обязательным preflight следующего Prepare, без обхода для выбранной source branch.
-
-**Regression:** `python -m unittest discover -s tests -v` включает select/no-op, несколько пропущенных releases, запрет prerelease и mismatched refs, reload/idempotence, preservation project-owned и direct transition. Доступ к GitHub App/срабатывание удалённого workflow проверяется отдельно уже после установки App; локальные unit-тесты не подтверждают права GitHub.
-
-
-## Конфигурация
-
-Target repository и допустимые release layouts находятся в:
-
-```text
-config/release.json
-```
-
-Source branch **не хранится в config вообще** и не имеет default. Её нужно явно вводить при каждом Prepare и Publish. Это сделано намеренно: release tooling не должен молча выпускать из `main`.
-
-Helper не выбирает layout по версии Harness и не использует fallback «наиболее похожего» каталога. Релиз разрешён только если в target repository найден **ровно один полный layout** (manifest + lock + update graph + validator). Если одновременно присутствуют оба layout или ни один не полон, операция блокируется.
-
-Deterministic helper:
-
-```bash
-python scripts/release.py --config config/release.json layout --repo-dir <repo>
-python scripts/release.py --config config/release.json current --repo-dir <repo>
-python scripts/release.py --config config/release.json prepare --repo-dir <repo> --version vX.Y.Z
-python scripts/release.py --config config/release.json prepare --repo-dir <repo> --version vX.Y.Z --reload-required
-python scripts/release.py --config config/release.json prepare --repo-dir <repo> --version vX.Y.Z --reload-required --transition-kind bridge --transition-reason "<reason>"
-python scripts/release.py --config config/release.json verify --repo-dir <repo> --version vX.Y.Z
-```
-
-Helper использует только Python standard library.
-
-Важно: `prepare` **не исправляет автоматически уже повреждённое release-state**. Если manifest, lock и graph расходятся, workflow блокируется; для такого случая нужен отдельный recovery PR.
-
-## Первичная настройка
-
-### 1. GitHub App
-
-Открой страницу создания App в организации:
-
-- [Create a new GitHub App для `ai-development-harness`](https://github.com/organizations/ai-development-harness/settings/apps/new)
-- [Список GitHub Apps организации](https://github.com/organizations/ai-development-harness/settings/apps)
-- [Документация GitHub: Creating GitHub Apps](https://docs.github.com/en/apps/creating-github-apps)
-
-Создай GitHub App, например:
-
-```text
-AI Harness Release Bot
-```
-
-Repository permissions:
-
-| Permission | Access |
-|---|---|
-| Contents | Read & write |
-| Pull requests | Read & write |
-| Checks | Read & write |
-| Metadata | Read-only |
-
-Webhook не требуется.
-
-После создания установи App в организации `ai-development-harness` **только** на:
-
-```text
-ai-development-harness-template
-```
-
-`release-canary` публичный и qualification читает его без App credentials. Добавлять canary в installation GitHub App не требуется.
-
-Инструкция GitHub:
-
-- [Installing your own GitHub App](https://docs.github.com/en/apps/using-github-apps/installing-your-own-github-app)
-- [Choosing permissions for a GitHub App](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/choosing-permissions-for-a-github-app)
-
-### 2. Private key
-
-На странице настроек созданного GitHub App в секции **Private keys** нажми **Generate a private key**.
-
-Документация:
-
-- [Managing private keys for GitHub Apps](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/managing-private-keys-for-github-apps)
-
-Затем открой страницу repository secrets:
-
-- [`maintainer-tools → Actions secrets`](https://github.com/ai-development-harness/maintainer-tools/settings/secrets/actions)
-- [Документация GitHub: Using secrets in GitHub Actions](https://docs.github.com/en/actions/how-tos/write-workflows/choose-what-workflows-do/use-secrets)
-
-Создай repository secret:
-
-```text
-HARNESS_RELEASE_APP_PRIVATE_KEY
-```
-
-В значение вставь **полное содержимое скачанного PEM-файла**, включая строки `BEGIN ... PRIVATE KEY` и `END ... PRIVATE KEY`.
-
-### 3. Client ID
-
-Client ID находится на странице настроек созданного GitHub App. Это **Client ID**, не legacy App ID.
-
-Открой страницу repository variables:
-
-- [`maintainer-tools → Actions variables`](https://github.com/ai-development-harness/maintainer-tools/settings/variables/actions)
-- [Документация GitHub: Store information in variables](https://docs.github.com/en/actions/how-tos/write-workflows/choose-what-workflows-do/use-variables)
-
-Создай repository variable:
-
-```text
-HARNESS_RELEASE_APP_CLIENT_ID
-```
-
-Workflow получает короткоживущие installation tokens через `actions/create-github-app-token@v3`. Prepare/Publish scope-ят token под нужные mutating permissions target repository; Release Qualification создаёт target-only token для exact-SHA Check и Harness checkout. Public canary читается без App token.
-
-Подробности официального сценария GitHub App + Actions:
-
-- [Making authenticated API requests with a GitHub App in a GitHub Actions workflow](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/making-authenticated-api-requests-with-a-github-app-in-a-github-actions-workflow)
-
-### 4. Immutable releases
-
-Для `ai-development-harness-template` рекомендуется оставить включённой release immutability.
-
-Документация:
-
-- [Preventing changes to releases](https://docs.github.com/en/code-security/how-tos/secure-your-supply-chain/establish-provenance-and-integrity/prevent-release-changes)
-
-## Использование
-
-Допустим, текущий release `v0.2.6`, нужен `v0.2.7`.
-
-**1. Prepare**
-
-Открой:
-
-- [Prepare Harness Release](https://github.com/ai-development-harness/maintainer-tools/actions/workflows/prepare-release.yml)
-
-и нажми **Run workflow**:
-
-```text
-version:           v0.2.7
+version:           vX.Y.Z
 harness_branch:    main
 reload_required:   false
 transition_kind:   standard
 transition_reason:
 ```
 
-Появится release PR в `ai-development-harness-template`. После push candidate автоматически стартует `Harness Release Qualification` для exact candidate SHA. Перед merge проверь diff, обычный Harness Integrity и отдельный qualification Check.
+Ветка обязательна: значения по умолчанию нет. Процесс сначала проверит, что последний стабильный релиз уже принят в canary. Это происходит до получения права записи, изменения файлов и создания релизной ветки.
 
-`reload_required` задаёт свойство **нового transition**, а не поведение самого workflow. Release helper намеренно не пытается угадать необходимость reload по diff.
+Затем Prepare проверит выбранную ветку и согласованность файлов версии, обновит их, выполнит проверку Harness и создаст ветку `release/vX.Y.Z` с PR в выбранную ветку. Если выбранная ветка успела измениться, публикация релизной ветки останавливается. Существующие релизные ветки, теги и Releases не перезаписываются.
 
-Обычно:
+Prepare автоматически запускает **Harness Release Qualification** для подготовленного commit. Он пока не создаёт тег и Release.
 
-```text
-reload_required: false
-```
+Параметры обновления задаются явно:
 
-Если после применения release старый updater/runtime нельзя безопасно продолжать в той же session, укажи:
+- `reload_required: true` нужен, если после установки этой версии старый процесс обновления нельзя безопасно продолжать и требуется новый запуск;
+- `transition_kind: bridge` обозначает переход через границу совместимости; для него обязательна понятная причина в `transition_reason`;
+- для обычного `standard` причина остаётся пустой.
 
-```text
-reload_required: true
-```
+Эти параметры описывают переход на новую версию, а не способ запуска Actions. Инструмент не выбирает их по изменённым файлам.
 
-Например для breaking protocol release, меняющего сам command interface.
+### 2. Проверить и слить релизный PR
 
-Если переход является bootstrap/compatibility boundary, выбери:
+Проверь изменения, обычные проверки **Harness Integrity** и отдельную **Harness Release Qualification**. После их успеха выполни **Squash and merge**.
 
-```text
-transition_kind:   bridge
-reload_required:   true
-transition_reason: <почему старый runtime не может безопасно продолжить>
-```
+Проверки относятся к точному commit, который определяется его SHA. После слияния SHA меняется, поэтому успешная проверка PR не заменяет проверку результата слияния.
 
-Для первого release после `v0.5.3` это обязательный contract: deterministic updater
-появляется на границе `v0.5.3 → next`, поэтому переход должен быть `bridge` и
-требовать reload.
+### 3. Опубликовать
 
-Если в `config/release.json` указаны `updateGraphMirrors`, helper проверяет их
-равенство canonical update graph до prepare и синхронизирует их тем же content.
-Это используется для legacy compatibility routing endpoint.
-
-**2. Merge**
-
-Сделай обычный **Squash and merge** release PR. Tag/Release вручную не создавай.
-
-**3. Publish**
-
-Открой:
-
-- [Publish Harness Release](https://github.com/ai-development-harness/maintainer-tools/actions/workflows/publish-release.yml)
-
-и нажми **Run workflow**:
+Запусти **Publish Harness Release** с той же версией и веткой:
 
 ```text
-version:        v0.2.7
+version:        vX.Y.Z
 harness_branch: main
-title:          v0.2.7 — Release title
+title:          vX.Y.Z — Краткое название релиза
 ```
 
-Workflow найдёт merge commit release PR именно в указанной `harness_branch` и только после повторной проверки создаст tag + Release. Для Publish указывай **ту же ветку**, которая использовалась при Prepare.
+Publish находит единственный слитый релизный PR для этой версии и ветки. Старые закрытые без слияния попытки подготовки не мешают выбору. Далее процесс повторно запускает qualification для commit после слияния и ждёт успешных проверок этого же commit:
 
-**4. Принять canary и завершить выпуск**
+- `Harness Release Qualification` от настроенного Release Bot;
+- `Validate Harness`;
+- `Validate Python 3.11 compatibility`;
+- `Validate Windows boundaries`.
 
-Дождись автоматического promotion PR в `release-canary`, проверь diff и три Harness Integrity checks, выполни review/merge. Запусти `python3 scripts/release_completion.py --version v0.2.7` и сохрани `COMPLETE` с PR URL и exact SHA в итоговом отчёте. Для подтверждения в Actions запусти **Verify Harness Release Completion**. На этом этапе заканчивается исходный запрос на выпуск релиза.
+Ожидание длится до 15 минут с опросом каждые 15 секунд. Учитывается последний запуск каждой проверки. Завершившаяся с ошибкой проверка, неизвестное состояние, неправильный источник проверки или ошибка GitHub API останавливают публикацию. Сам шаг ожидания ограничен 16 минутами.
 
-## Failure policy
+Тег указывает на проверенный commit релизного PR. Позднейшие изменения в выбранной ветке в этот релиз не попадут. После частичного сбоя Publish можно повторить: существующий тег принимается только на ожидаемом commit, а существующий Release — с ожидаемым названием.
 
-- Harness branch не указана, невалидна или не существует → workflow блокируется; fallback на `main` отсутствует.
-- Source branch сдвинулась во время Prepare → workflow блокируется до push release branch.
-- Exact candidate SHA не достижим из выбранной release/source branch → Release Qualification блокируется.
-- Public `release-canary` нельзя прочитать или разрешить его exact branch SHA → qualification Check завершается failure.
-- Current/minimum/Windows/downstream gate failed/skipped/incomplete или превысил timeout → exact-SHA qualification не может стать success.
-- Зависание canonical runner/platform tooling дольше outer job timeout → Actions принудительно завершает job, finalizer фиксирует qualification failure.
-- Нет merged release PR в выбранной Harness branch → publish блокируется.
-- Merge commit release PR больше не достижим из выбранной Harness branch → publish блокируется.
-- Exact merge SHA не прошёл свежую `Harness Release Qualification` → tag/Release не создаются.
-- Последний обязательный Check Run на exact merge SHA отсутствует или ещё выполняется → ожидание до 15 минут, затем timeout без tag/Release; завершился неуспешно → немедленная блокировка.
-- Check с ожидаемым именем создан не ожидаемым GitHub App → gate считает его недействительным.
-- Metadata не соответствует requested version → publish блокируется до создания tag.
-- Tag существует на другом commit → tag не перемещается.
-- Release branch/tag/release уже существует при Prepare → overwrite не выполняется.
-- Текущий release-state неконсистентен → Prepare блокируется и требует recovery PR.
-- Последний stable не принят в canary через merged promotion PR или exact pin не совпадает → выпуск остаётся незавершённым, следующий Prepare блокируется.
+### 4. Принять обновление canary
 
-## Проверки maintainer-tools
+После успешной публикации автоматически запускается **Promote Published Harness Canary**. Он обновляет отдельную копию canary штатным updater, проверяет её и открывает PR `promotion/vX.Y.Z` в `release-canary/main`.
+
+Дождись трёх независимых проверок в этом PR — `Validate Harness`, `Validate Python 3.11 compatibility`, `Validate Windows boundaries`. Проверь изменения и слей PR. Сам workflow не сливает PR и не использует auto-merge.
+
+Если было пропущено несколько релизов, promotion выбирает ближайший следующий стабильный релиз по номеру версии. Нужно последовательно принять каждый PR. Черновики и предварительные релизы не подходят. Уже существующая ветка promotion не перезаписывается, дубликат PR не создаётся.
+
+### 5. Подтвердить завершение
+
+После слияния promotion PR запусти **Verify Harness Release Completion** для немедленного подтверждения в Actions. Без ручного запуска проверка повторится после очередного ежечасного promotion.
+
+Конкретную версию можно проверить из этого репозитория:
 
 ```bash
-python -m unittest discover -s tests -v
-python -m py_compile scripts/release.py
+python3 scripts/release_completion.py --version vX.Y.Z
 ```
 
-То же выполняет `.github/workflows/ci.yml`.
+Результат `COMPLETE` означает, что одновременно подтверждены:
 
-Постоянные regression-тесты `tests/test_prepare_negative.py` запускают production
-`release_completion.py` через настоящий subprocess и изолированный `gh` fixture.
-Старая база и отсутствие merged promotion PR обязаны вернуть `BLOCKED` / exit 1
-до всех маркеров последующих mutations; актуальная база служит положительным
-контролем. Команда извлекается из Prepare, а тест проверяет её порядок перед
-write token / metadata / release branch / PR и отсутствие обходов failure.
-Шаг CI **Verify Prepare negative scenarios** выполняется на каждом PR и push в main;
-реальные GitHub mutations тестами не выполняются.
+1. Версия опубликована как стабильный релиз, а тег разрешён в точный commit.
+2. Manifest и lock из одного снимка `release-canary/main` указывают на эту версию, репозиторий и commit.
+3. Существует единственный слитый promotion PR из canary в его `main`; commit слияния входит в историю принятой базы.
+4. Ветка canary не изменилась за время проверки.
 
-## Структура
+Результат содержит ссылки и SHA для итогового отчёта. `BLOCKED` и ненулевой код выхода означают, что выпуск ещё не завершён. Ответственный за выпуск продолжает эту работу в рамках исходного запроса, без отдельного напоминания. Если продолжение невозможно, он сообщает конкретную причину остановки.
 
-```text
-.github/workflows/ci.yml
-.github/workflows/prepare-release.yml
-.github/workflows/release-qualification.yml
-.github/workflows/publish-release.yml
-config/release.json
-scripts/release.py
-tests/test_release.py
-tests/test_workflows.py
+## Почему следующий Prepare не обойдёт canary
+
+Один и тот же скрипт проверяет завершение выпуска и разрешает подготовку следующего. Без `--version` он проверяет последний опубликованный стабильный релиз по номеру версии. Если новый релиз появился во время проверки, её нужно повторить.
+
+```mermaid
+flowchart TD
+    A["Начало следующего Prepare"] --> B["Прочитать последний релиз и canary main"]
+    B --> C{"Версия, SHA и слитый PR подтверждены?"}
+    C -->|Нет или ошибка API| D["BLOCKED, код выхода 1"]
+    D --> E["Дальнейшие шаги пропущены"]
+    E --> F["Нет права записи, новой ветки и PR"]
+    C -->|Да| G["Получить право записи"]
+    G --> H["Подготовить файлы версии"]
+    H --> I["Создать релизную ветку и PR"]
 ```
 
-## Главное правило
+Эта проверка обязательна и при выборе другой ветки Harness. Локальная версия canary, зелёный Publish или успешное создание promotion PR не заменяют принятие версии в удалённом `main`.
 
-Релиз Harness больше не начинается с **Draft a new release**.
+## Что проверяется до и после публикации
 
-Сначала:
+**До публикации** qualification читает точную принятую версию `release-canary/main` и создаёт отдельную копию. Сам canary не изменяется. Проверяются Linux с Python 3.13, Linux с минимальным Python 3.11, Windows с Python 3.13 и обновление уже настроенного проекта. Ограниченные нагрузочные проверки входят в основной runner Harness. Результаты сохраняются в артефактах Actions.
 
-```text
-Prepare Harness Release
-        ↓
-Harness Release Qualification (exact candidate SHA)
+У каждой проверки есть внутренний лимит времени, а у задания Actions — дополнительный внешний: 5 минут для начала и завершения, 15 минут для Python 3.11, 20 минут для остальных заданий. Пропущенная, незавершённая или зависшая обязательная проверка не даёт успешного результата.
+
+**После публикации** promotion применяет опубликованный тег настоящим `harness-update.py`. При необходимости продолжает обновление в новом Python-процессе. Затем проверяет схему проекта, `HARNESS STATUS`, `HARNESS DOCTOR`, validator, все self-tests и сохранность проектных файлов. Повторное обновление должно вернуть `NO_UPDATE` без изменения файлов. Отчёт сохраняется в `docs/baseline-promotions/vX.Y.Z.md` контрольного проекта.
+
+Перед созданием promotion PR также проверяются точный commit тега, его наличие в истории Harness `main` и прямой переход с установленной версии. Право записи в canary выдаётся только для публикации проверенных изменений и недоступно updater и self-tests. Ошибка promotion не удаляет уже опубликованный релиз, но выпуск остаётся незавершённым.
+
+## Если процесс остановился
+
+| Причина | Что делать |
+| --- | --- |
+| Старая база canary или невлитый promotion PR | Дождаться CI, проверить и слить promotion PR, подтвердить `COMPLETE`, повторить Prepare |
+| Promotion PR не появился | Проверить журнал promotion и доступ GitHub App; повторить workflow вручную |
+| Выбранная ветка изменилась во время Prepare | Повторить подготовку на её актуальном состоянии |
+| Файлы версии не согласованы | Исправить их отдельным PR; Prepare не исправляет повреждённое состояние автоматически |
+| Проверки ещё выполняются | Дождаться результатов; Publish ждёт до 15 минут |
+| Проверка завершилась с ошибкой или превысила время | Исправить причину и повторить нужный процесс; результат другого commit не засчитывается |
+| Существующий тег указывает на другой commit | Остановиться и разобрать конфликт; тег автоматически не перемещается |
+| Ошибка API или canary недоступен | Восстановить доступ и повторить проверку; недоступность не считается успехом |
+
+## Одноразовая настройка GitHub
+
+### Приложение Release Bot
+
+Установи GitHub App **AI Harness Release Bot** организации на оба репозитория:
+
+- `ai-development-harness-template` — подготовка и публикация релиза;
+- `release-canary` — создание PR обновления базы.
+
+Права приложения:
+
+| Permission | Access | Для чего |
+| --- | --- | --- |
+| Contents | Read & write | Ветки, теги и релизы |
+| Pull requests | Read & write | Создание и чтение PR |
+| Checks | Read & write | Результат qualification для точного commit |
+| Workflows | Read & write | Обновление workflow canary штатным updater |
+| Metadata | Read-only | Чтение сведений о репозитории |
+
+Webhook не требуется. При изменении прав подтверди их в установленном приложении. Каждый процесс запрашивает только нужные ему права и репозиторий: например, запись при promotion ограничена canary. Qualification читает публичный canary без токена приложения; **это не отменяет необходимость установки приложения в canary для создания PR**.
+
+В настройках `maintainer-tools` добавь:
+
+| Где | Имя | Значение |
+| --- | --- | --- |
+| [Actions variables](https://github.com/ai-development-harness/maintainer-tools/settings/variables/actions) | `HARNESS_RELEASE_APP_CLIENT_ID` | Client ID приложения, не старый App ID |
+| [Actions secrets](https://github.com/ai-development-harness/maintainer-tools/settings/secrets/actions) | `HARNESS_RELEASE_APP_PRIVATE_KEY` | Полный PEM-ключ, включая строки BEGIN и END |
+
+Права записи получают через `actions/create-github-app-token`. Созданные приложением PR запускают обычный CI. Настрой в canary защиту `main`: три обязательных Harness Integrity checks и review перед merge. Само наличие workflow ещё не делает проверки обязательным правилом ветки.
+
+Для Harness рекомендуется включить неизменяемость опубликованных релизов. Настройки приложения доступны в [GitHub Apps организации](https://github.com/organizations/ai-development-harness/settings/apps).
+
+## Проверки самих инструментов выпуска
+
+Обычный CI запускается на каждом PR и push в `main`. Он проверяет подготовку версий, выбор релизного PR, ожидание проверок, обновление canary и завершение выпуска. Все локальные тесты используют изолированные данные и не создают объекты в GitHub.
+
+Отдельный шаг **Verify Prepare negative scenarios** запускает настоящий `release_completion.py` отдельным процессом. Вместо сети он получает подготовленные ответы `gh`: старая база и отсутствие слитого PR должны остановить выполнение до маркеров шагов записи. Актуальная база должна разрешать продолжение. Тесты также проверяют порядок шагов в настоящем Prepare и отсутствие способов игнорировать отказ.
+
+Шаг **Verify Prepare regression sensitivity** проверяет уже сами эти тесты. Это mutation-проверка: мы намеренно ломаем временную копию workflow и требуем, чтобы тесты заметили каждую поломку.
+
+```mermaid
+flowchart TD
+    CI["PR или push в main"] --> Unit["Обычные тесты"]
+    Unit --> Negative["Старая база и невлитый PR должны блокировать Prepare"]
+    Negative --> Copy["Создать одноразовую копию файлов"]
+    Copy --> Base["Исходные 3 теста проходят"]
+    Base --> Remove["Удалить gate: ожидаются 3 падения"]
+    Remove --> Move["Перенести gate после создания ветки: ожидаются 3 падения"]
+    Move --> Ignore["Добавить continue-on-error: ожидаются 3 падения"]
+    Ignore --> Restore["Восстановить workflow: 3 теста снова проходят"]
+    Restore --> Pass["CI успешен"]
 ```
 
-после зелёного candidate qualification и review/merge:
+Каждая мутация строится из исходного workflow отдельно. Успех засчитывается только при ожидаемой причине падения. Пропущенные тесты, ошибки запуска, исчезновение сценария или таймаут останавливают CI. Временная копия удаляется; исходные файлы остаются неизменными. Проверки чувствительности ограничены двумя минутами в Actions.
 
-```text
-Publish Harness Release
+Локальный запуск:
+
+```bash
+python3 -m unittest discover -s tests -v
+python3 tests/run_prepare_mutations.py
 ```
 
-Candidate qualification не является разрешением переиспользовать PASS для другого SHA. При запуске Publish exact release merge SHA автоматически квалифицируется повторно; tag создаётся только после успешной qualification и successful Harness Integrity checks на том же SHA.
+Эти тесты не подтверждают права GitHub App или доступность GitHub. Работу связей между процессами проверяют реальные запуски Actions.
 
-После Publish обязательно заверши canary promotion и получи `COMPLETE` от release completion gate. Только после этого сообщай, что выпуск завершён, и готовь следующий релиз.
+## Файлы и служебные команды
+
+| Путь | Назначение |
+| --- | --- |
+| `.github/workflows/` | Порядок запуска процессов и CI |
+| `config/release.json` | Репозиторий Harness и поддерживаемые расположения файлов |
+| `scripts/release.py` | Чтение, подготовка и проверка версии |
+| `scripts/resolve_release_pr.py` | Выбор единственного слитого релизного PR |
+| `scripts/release_gates.py` | Ожидание обязательных проверок перед публикацией |
+| `scripts/canary_promotion.py` | Выбор следующей версии и проверка обновления canary |
+| `scripts/release_completion.py` | Подтверждение принятия опубликованной версии в canary |
+| `tests/test_prepare_negative.py` | Постоянные отрицательные сценарии Prepare |
+| `tests/run_prepare_mutations.py` | Проверка чувствительности этих тестов |
+
+Ветка Harness не хранится в конфигурации: её каждый раз явно указывают в Prepare и Publish. `release.py` допускает ровно один полный набор manifest, lock, update graph и validator: современный `.harness` или старый `.project`. Два набора одновременно или неполный набор блокируют работу.
+
+При подготовке синхронизируются версия manifest, `release/source.ref` в lock и каталог переходов обновления. Для стратегии `direct` старые входные версии получают прямой переход на новую. Настроенные через `updateGraphMirrors` копии каталога проверяются на равенство и обновляются вместе с ним.
+
+В релизном lock намеренно нет `source.commit`: SHA создаваемого commit ещё неизвестен. После установки updater разрешает опубликованный тег и записывает точный SHA в lock проекта.
+
+Команды для диагностики и локальной подготовки файлов:
+
+```bash
+python3 scripts/release.py --config config/release.json layout --repo-dir <repo>
+python3 scripts/release.py --config config/release.json current --repo-dir <repo>
+python3 scripts/release.py --config config/release.json prepare --repo-dir <repo> --version vX.Y.Z
+python3 scripts/release.py --config config/release.json prepare --repo-dir <repo> --version vX.Y.Z --reload-required
+python3 scripts/release.py --config config/release.json prepare --repo-dir <repo> --version vX.Y.Z --reload-required --transition-kind bridge --transition-reason "Причина перехода"
+python3 scripts/release.py --config config/release.json verify --repo-dir <repo> --version vX.Y.Z
+```
+
+Эти команды сами по себе не публикуют релиз и не заменяют обязательные проверки Actions. Python-скрипты используют стандартную библиотеку.
