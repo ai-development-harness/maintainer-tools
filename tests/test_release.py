@@ -177,6 +177,24 @@ class ReleaseHelperTest(unittest.TestCase):
             {"from": "v0.2.4", "to": "v0.2.5", "kind": "standard", "reloadRequired": False},
         )
 
+    def test_direct_catalog_flattens_all_entries_on_every_release(self) -> None:
+        graph_path = self.root / ".project/harness-update-graph.json"
+        graph = json.loads(graph_path.read_text())
+        graph["strategy"] = "direct"
+        release.write_json(graph_path, graph)
+        for version in ("v0.2.5", "v0.3.0"):
+            args = type("Args", (), dict(config=self.config_path, repo_dir=self.root,
+                                         version=version, reload_required=False))()
+            release.command_prepare(args)
+            _, _, graph = release.state(self.root, self.config)
+            self.assertEqual(graph["strategy"], "direct")
+            self.assertTrue(all(edge["to"] == version and edge["reloadRequired"]
+                                for edge in graph["transitions"]))
+            self.assertEqual(len({edge["from"] for edge in graph["transitions"]}),
+                             len(graph["transitions"]))
+        self.assertEqual({edge["from"] for edge in graph["transitions"]},
+                         {"v0.2.3", "v0.2.4", "v0.2.5"})
+
     def test_prepare_removes_source_commit_from_release_snapshot(self) -> None:
         lock_path = self.root / ".project" / "harness.lock.json"
         lock = json.loads(lock_path.read_text(encoding="utf-8"))
