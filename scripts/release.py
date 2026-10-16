@@ -333,7 +333,15 @@ def command_prepare(args: argparse.Namespace) -> None:
     }
     if transition_kind == "bridge":
         edge["reason"] = transition_reason
-    graph["transitions"].append(edge)
+    if graph.get("strategy") == "direct":
+        # Compatibility catalog for installed legacy clients. New clients use
+        # immutable tags directly; every old entry reaches the new release once.
+        graph["transitions"] = [
+            {"from": version, "to": target, "kind": "standard", "reloadRequired": True}
+            for version in sorted(all_nodes, key=semver)
+        ]
+    else:
+        graph["transitions"].append(edge)
     validate_graph(graph)
     write_json(graph_path, graph)
     for mirror_path in graph_mirror_paths(args.repo_dir, config):
